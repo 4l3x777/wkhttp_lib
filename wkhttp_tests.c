@@ -1,0 +1,341 @@
+#include <ntddk.h>
+#include "ktls_lib.h"
+#include "kdns_lib.h"
+#include "khttp_lib.h"
+
+// =============================================================
+// HELPER FUNCTIONS
+// =============================================================
+
+VOID PrintResponse(PCHAR Buffer, ULONG Length) {
+    ULONG Offset = 0;
+    while (Offset < Length) {
+        ULONG Chunk = (Length - Offset) > 500 ? 500 : (Length - Offset);
+        CHAR Temp = Buffer[Offset + Chunk];
+        Buffer[Offset + Chunk] = 0;
+        DbgPrint("%s", &Buffer[Offset]);
+        Buffer[Offset + Chunk] = Temp;
+        Offset += Chunk;
+    }
+    DbgPrint("\n");
+}
+
+// =============================================================
+// TESTS
+// =============================================================
+
+VOID TestDns(void) {
+    NTSTATUS Status;
+    ULONG Ip;
+
+    DbgPrint("\n[DNS] Resolving ya.ru...\n");
+    Status = KdnsResolve("ya.ru", INETADDR(8, 8, 8, 8), 3000, &Ip);
+    if (NT_SUCCESS(Status)) {
+        DbgPrint("[DNS] OK - IP: %02x.%02x.%02x.%02x\n",
+            (Ip >> 0) & 0xFF, (Ip >> 8) & 0xFF,
+            (Ip >> 16) & 0xFF, (Ip >> 24) & 0xFF);
+    }
+    else {
+        DbgPrint("[DNS] FAIL - 0x%08x\n", Status);
+    }
+}
+
+VOID TestTls(void) {
+    PKTLS_SESSION Session = NULL;
+    PVOID Buffer = NULL;
+    ULONG Bytes;
+    NTSTATUS Status;
+
+    DbgPrint("\n[TLS] Connecting to 1.1.1.1:4443...\n");
+    Status = KtlsConnect(INETADDR(1, 1, 1, 1), 4443, KTLS_PROTO_TCP, "1.1.1.1", &Session);
+    if (!NT_SUCCESS(Status)) {
+        DbgPrint("[TLS] FAIL - 0x%08x\n", Status);
+        return;
+    }
+    DbgPrint("[TLS] Connected\n");
+
+    KtlsSetTimeout(Session, 9000);
+    const char* Req = "GET / HTTP/1.1\r\nHost: 1.1.1.1\r\nConnection: close\r\n\r\n";
+    KtlsSend(Session, (PVOID)Req, (ULONG)strlen(Req), &Bytes);
+
+    Buffer = ExAllocatePoolWithTag(NonPagedPool, 4096, 'TEST');
+    if (Buffer) {
+        Status = KtlsRecv(Session, Buffer, 4095, &Bytes);
+        if (Status == STATUS_SUCCESS) {
+            DbgPrint("[TLS] RX %u bytes:\n", Bytes);
+            PrintResponse((PCHAR)Buffer, Bytes);
+        }
+        ExFreePoolWithTag(Buffer, 'TEST');
+    }
+    KtlsClose(Session);
+}
+
+VOID TestDtls(void) {
+    PKTLS_SESSION Session = NULL;
+    PVOID Buffer = NULL;
+    ULONG Bytes;
+    NTSTATUS Status;
+
+    DbgPrint("\n[DTLS] Connecting to 1.1.1.1:4443...\n");
+    Status = KtlsConnect(INETADDR(1, 1, 1, 1), 4443, KTLS_PROTO_UDP, "1.1.1.1", &Session);
+    if (!NT_SUCCESS(Status)) {
+        DbgPrint("[DTLS] FAIL - 0x%08x\n", Status);
+        return;
+    }
+    DbgPrint("[DTLS] Connected\n");
+
+    KtlsSetTimeout(Session, 9000);
+    const char* Msg = "Hello DTLS";
+    KtlsSend(Session, (PVOID)Msg, (ULONG)strlen(Msg), &Bytes);
+
+    Buffer = ExAllocatePoolWithTag(NonPagedPool, 1024, 'TEST');
+    if (Buffer) {
+        Status = KtlsRecv(Session, Buffer, 1024, &Bytes);
+        if (NT_SUCCESS(Status)) {
+            DbgPrint("[DTLS] RX %u bytes:\n", Bytes);
+            PrintResponse((PCHAR)Buffer, Bytes);
+        }
+        ExFreePoolWithTag(Buffer, 'TEST');
+    }
+    KtlsClose(Session);
+}
+
+VOID TestHttp(void) {
+    PKHTTP_RESPONSE Response = NULL;
+    NTSTATUS Status;
+
+    // GET
+    DbgPrint("\n[HTTP] GET httpbin.org/get\n");
+    Status = KhttpGet("http://httpbin.org/get", NULL, NULL, &Response);
+    if (NT_SUCCESS(Status) && Response) {
+        DbgPrint("[HTTP] Status %lu, Size %lu\n", Response->StatusCode, Response->BodyLength);
+        KhttpFreeResponse(Response);
+    }
+    else {
+        DbgPrint("[HTTP] FAIL - 0x%08x\n", Status);
+    }
+
+    // POST
+    DbgPrint("\n[HTTP] POST httpbin.org/post\n");
+    Status = KhttpPost("http://httpbin.org/post",
+        "Content-Type: application/json\r\n",
+        "{\"test\":\"data\"}",
+        NULL, &Response);
+    if (NT_SUCCESS(Status) && Response) {
+        DbgPrint("[HTTP] Status %lu\n", Response->StatusCode);
+        KhttpFreeResponse(Response);
+    }
+    else {
+        DbgPrint("[HTTP] FAIL - 0x%08x\n", Status);
+    }
+
+    // HEAD - Changed to ya.ru
+    DbgPrint("\n[HTTP] HEAD ya.ru\n");
+    Status = KhttpHead("http://ya.ru/", NULL, NULL, &Response);
+    if (NT_SUCCESS(Status) && Response) {
+        DbgPrint("[HTTP] Status %lu, Body %lu bytes\n", Response->StatusCode, Response->BodyLength);
+        KhttpFreeResponse(Response);
+    }
+    else {
+        DbgPrint("[HTTP] FAIL - 0x%08x\n", Status);
+    }
+}
+
+VOID TestHttps(void) {
+    PKHTTP_RESPONSE Response = NULL;
+    NTSTATUS Status;
+
+    // HTTPS GET with domain name
+    DbgPrint("\n[HTTPS] GET httpbin.org/get\n");
+    Status = KhttpGet("https://httpbin.org/get",
+        "Accept: application/json\r\n",
+        NULL, &Response);
+    if (NT_SUCCESS(Status) && Response) {
+        DbgPrint("[HTTPS] Status %lu, Size %lu\n", Response->StatusCode, Response->BodyLength);
+        if (Response->Body && Response->BodyLength > 0) {
+            ULONG PrintLen = min(Response->BodyLength, 150);
+            DbgPrint("[HTTPS] Body: %.*s...\n", PrintLen, Response->Body);
+        }
+        KhttpFreeResponse(Response);
+    }
+    else {
+        DbgPrint("[HTTPS] FAIL - 0x%08x\n", Status);
+    }
+
+    // HTTPS POST
+    DbgPrint("\n[HTTPS] POST httpbin.org/post\n");
+    Status = KhttpPost("https://httpbin.org/post",
+        "Content-Type: application/json\r\n",
+        "{\"secure\":true,\"kernel\":\"mode\"}",
+        NULL, &Response);
+    if (NT_SUCCESS(Status) && Response) {
+        DbgPrint("[HTTPS] Status %lu\n", Response->StatusCode);
+        KhttpFreeResponse(Response);
+    }
+    else {
+        DbgPrint("[HTTPS] FAIL - 0x%08x\n", Status);
+    }
+
+    // HTTPS with JSONPlaceholder
+    DbgPrint("\n[HTTPS] GET jsonplaceholder.typicode.com/posts/1\n");
+    Status = KhttpGet("https://jsonplaceholder.typicode.com/posts/1",
+        NULL, NULL, &Response);
+    if (NT_SUCCESS(Status) && Response) {
+        DbgPrint("[HTTPS] Status %lu\n", Response->StatusCode);
+        if (Response->Body && Response->BodyLength > 0) {
+            ULONG PrintLen = min(Response->BodyLength, 100);
+            DbgPrint("[HTTPS] Body: %.*s...\n", PrintLen, Response->Body);
+        }
+        KhttpFreeResponse(Response);
+    }
+    else {
+        DbgPrint("[HTTPS] FAIL - 0x%08x\n", Status);
+    }
+
+    // HTTPS HEAD to ya.ru
+    DbgPrint("\n[HTTPS] HEAD ya.ru\n");
+    Status = KhttpHead("https://ya.ru/", NULL, NULL, &Response);
+    if (NT_SUCCESS(Status) && Response) {
+        DbgPrint("[HTTPS] Status %lu, Body %lu bytes\n", Response->StatusCode, Response->BodyLength);
+        KhttpFreeResponse(Response);
+    }
+    else {
+        DbgPrint("[HTTPS] FAIL - 0x%08x\n", Status);
+    }
+}
+
+VOID TestRestApi(void) {
+    PKHTTP_RESPONSE Response = NULL;
+    NTSTATUS Status;
+
+    DbgPrint("\n[REST] GET /posts/1\n");
+    Status = KhttpGet("http://jsonplaceholder.typicode.com/posts/1", NULL, NULL, &Response);
+    if (NT_SUCCESS(Status) && Response) {
+        DbgPrint("[REST] Status %lu\n", Response->StatusCode);
+        KhttpFreeResponse(Response);
+    }
+
+    DbgPrint("\n[REST] POST /posts\n");
+    Status = KhttpPost("http://jsonplaceholder.typicode.com/posts",
+        "Content-Type: application/json\r\n",
+        "{\"title\":\"test\",\"body\":\"kernel\",\"userId\":1}",
+        NULL, &Response);
+    if (NT_SUCCESS(Status) && Response) {
+        DbgPrint("[REST] Status %lu\n", Response->StatusCode);
+        KhttpFreeResponse(Response);
+    }
+
+    DbgPrint("\n[REST] PUT /posts/1\n");
+    Status = KhttpPut("http://jsonplaceholder.typicode.com/posts/1",
+        "Content-Type: application/json\r\n",
+        "{\"id\":1,\"title\":\"updated\",\"body\":\"content\",\"userId\":1}",
+        NULL, &Response);
+    if (NT_SUCCESS(Status) && Response) {
+        DbgPrint("[REST] Status %lu\n", Response->StatusCode);
+        KhttpFreeResponse(Response);
+    }
+
+    DbgPrint("\n[REST] PATCH /posts/1\n");
+    Status = KhttpPatch("http://jsonplaceholder.typicode.com/posts/1",
+        "Content-Type: application/json\r\n",
+        "{\"title\":\"patched\"}",
+        NULL, &Response);
+    if (NT_SUCCESS(Status) && Response) {
+        DbgPrint("[REST] Status %lu\n", Response->StatusCode);
+        KhttpFreeResponse(Response);
+    }
+
+    DbgPrint("\n[REST] DELETE /posts/1\n");
+    Status = KhttpDelete("http://jsonplaceholder.typicode.com/posts/1", NULL, NULL, &Response);
+    if (NT_SUCCESS(Status) && Response) {
+        DbgPrint("[REST] Status %lu\n", Response->StatusCode);
+        KhttpFreeResponse(Response);
+    }
+}
+
+VOID TestRestApiHttps(void) {
+    PKHTTP_RESPONSE Response = NULL;
+    NTSTATUS Status;
+
+    DbgPrint("\n[REST-HTTPS] GET /posts/1\n");
+    Status = KhttpGet("https://jsonplaceholder.typicode.com/posts/1", NULL, NULL, &Response);
+    if (NT_SUCCESS(Status) && Response) {
+        DbgPrint("[REST-HTTPS] Status %lu\n", Response->StatusCode);
+        KhttpFreeResponse(Response);
+    }
+    else {
+        DbgPrint("[REST-HTTPS] FAIL - 0x%08x\n", Status);
+    }
+
+    DbgPrint("\n[REST-HTTPS] POST /posts\n");
+    Status = KhttpPost("https://jsonplaceholder.typicode.com/posts",
+        "Content-Type: application/json\r\n",
+        "{\"title\":\"secure test\",\"body\":\"https kernel\",\"userId\":1}",
+        NULL, &Response);
+    if (NT_SUCCESS(Status) && Response) {
+        DbgPrint("[REST-HTTPS] Status %lu\n", Response->StatusCode);
+        KhttpFreeResponse(Response);
+    }
+    else {
+        DbgPrint("[REST-HTTPS] FAIL - 0x%08x\n", Status);
+    }
+
+    DbgPrint("\n[REST-HTTPS] PUT /posts/1\n");
+    Status = KhttpPut("https://jsonplaceholder.typicode.com/posts/1",
+        "Content-Type: application/json\r\n",
+        "{\"id\":1,\"title\":\"secure update\",\"body\":\"https content\",\"userId\":1}",
+        NULL, &Response);
+    if (NT_SUCCESS(Status) && Response) {
+        DbgPrint("[REST-HTTPS] Status %lu\n", Response->StatusCode);
+        KhttpFreeResponse(Response);
+    }
+    else {
+        DbgPrint("[REST-HTTPS] FAIL - 0x%08x\n", Status);
+    }
+
+    DbgPrint("\n[REST-HTTPS] DELETE /posts/1\n");
+    Status = KhttpDelete("https://jsonplaceholder.typicode.com/posts/1", NULL, NULL, &Response);
+    if (NT_SUCCESS(Status) && Response) {
+        DbgPrint("[REST-HTTPS] Status %lu\n", Response->StatusCode);
+        KhttpFreeResponse(Response);
+    }
+    else {
+        DbgPrint("[REST-HTTPS] FAIL - 0x%08x\n", Status);
+    }
+}
+
+// =============================================================
+// DRIVER ENTRY
+// =============================================================
+
+VOID DriverUnload(PDRIVER_OBJECT DriverObject) {
+    UNREFERENCED_PARAMETER(DriverObject);
+    KhttpGlobalCleanup();
+    DbgPrint("\n[Driver] Unloaded\n");
+}
+
+NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath) {
+    UNREFERENCED_PARAMETER(RegistryPath);
+    DriverObject->DriverUnload = DriverUnload;
+
+    DbgPrint("\n[Driver] Windows Kernel HTTP Library\n");
+
+    KhttpGlobalInit();
+
+    // Low-level tests
+    TestDns();
+    TestTls();
+    TestDtls();
+
+    // HTTP tests (plain TCP)
+    TestHttp();
+    TestRestApi();
+
+    // HTTPS tests (TLS)
+    TestHttps();
+    TestRestApiHttps();
+
+    DbgPrint("\n[Driver] Tests complete\n");
+
+    return STATUS_SUCCESS;
+}

@@ -1,0 +1,77 @@
+;
+; wkhttp.inf
+;
+
+[Version]
+Signature="$WINDOWS NT$"
+Class=System ; TODO: specify appropriate Class
+ClassGuid={4d36e97d-e325-11ce-bfc1-08002be10318} ; TODO: specify appropriate ClassGuid
+Provider=%ManufacturerName%
+CatalogFile=wkhttp.cat
+DriverVer= ; TODO: set DriverVer in stampinf property pages
+PnpLockdown=1
+
+[DestinationDirs]
+DefaultDestDir = 12
+wkhttp_Device_CoInstaller_CopyFiles = 11
+
+[SourceDisksNames]
+1 = %DiskName%,,,""
+
+[SourceDisksFiles]
+wkhttp.sys  = 1,,
+WdfCoInstaller$KMDFCOINSTALLERVERSION$.dll=1 ; make sure the number matches with SourceDisksNames
+
+;*****************************************
+; Install Section
+;*****************************************
+
+[Manufacturer]
+%ManufacturerName%=Standard,NT$ARCH$
+
+[Standard.NT$ARCH$]
+%wkhttp.DeviceDesc%=wkhttp_Device, Root\wkhttp ; TODO: edit hw-id
+
+[wkhttp_Device.NT]
+CopyFiles=Drivers_Dir
+
+[Drivers_Dir]
+wkhttp.sys
+
+;-------------- Service installation
+[wkhttp_Device.NT.Services]
+AddService = wkhttp,%SPSVCINST_ASSOCSERVICE%, wkhttp_Service_Inst
+
+; -------------- wkhttp driver install sections
+[wkhttp_Service_Inst]
+DisplayName    = %wkhttp.SVCDESC%
+ServiceType    = 1               ; SERVICE_KERNEL_DRIVER
+StartType      = 3               ; SERVICE_DEMAND_START
+ErrorControl   = 1               ; SERVICE_ERROR_NORMAL
+ServiceBinary  = %12%\wkhttp.sys
+
+;
+;--- wkhttp_Device Coinstaller installation ------
+;
+
+[wkhttp_Device.NT.CoInstallers]
+AddReg=wkhttp_Device_CoInstaller_AddReg
+CopyFiles=wkhttp_Device_CoInstaller_CopyFiles
+
+[wkhttp_Device_CoInstaller_AddReg]
+HKR,,CoInstallers32,0x00010000, "WdfCoInstaller$KMDFCOINSTALLERVERSION$.dll,WdfCoInstaller"
+
+[wkhttp_Device_CoInstaller_CopyFiles]
+WdfCoInstaller$KMDFCOINSTALLERVERSION$.dll
+
+[wkhttp_Device.NT.Wdf]
+KmdfService =  wkhttp, wkhttp_wdfsect
+[wkhttp_wdfsect]
+KmdfLibraryVersion = $KMDFVERSION$
+
+[Strings]
+SPSVCINST_ASSOCSERVICE= 0x00000002
+ManufacturerName="<Your manufacturer name>" ;TODO: Replace with your manufacturer name
+DiskName = "wkhttp Installation Disk"
+wkhttp.DeviceDesc = "wkhttp Device"
+wkhttp.SVCDESC = "wkhttp Service"
