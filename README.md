@@ -5,7 +5,7 @@ Kernel-mode HTTP/HTTPS client and TLS/DTLS transport library for Windows drivers
 
 ---
 
-## Проект был создан из-за отсутсвия на GitHub толковых библиотек для работы с htpp в контексте ядра Windows
+## Проект был создан из-за отсутсвия на GitHub толковых библиотек для работы с http в контексте ядра Windows
 
 ## Если понравился проект, жмякни стар (if you like the project, click star) ^_^
 
