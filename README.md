@@ -83,9 +83,9 @@ if (NT_SUCCESS(Status) && Resp) {
 
 ## 3. Multipart File Upload
 
-## Upload files using multipart/form-data encoding. Supports automatic chunked transfer for large files
+### Upload files using multipart/form-data encoding. Supports automatic chunked transfer for large files
 
-## Upload Single File
+### Upload Single File
 
 ```C
 // Allocate file data in NonPagedPool
@@ -128,7 +128,7 @@ if (NT_SUCCESS(Status) && Response) {
 ExFreePoolWithTag(FileData, 'FILE');
 ```
 
-## Upload Multiple Files with Form Data
+### Upload Multiple Files with Form Data
 
 ```C
 // Form fields
@@ -168,7 +168,7 @@ NTSTATUS Status = KhttpPostMultipartChunked(
 );
 ```
 
-## Upload with Progress Callback
+### Upload with Progress Callback
 
 ```C
 VOID UploadProgressCallback(
@@ -191,7 +191,7 @@ KHTTP_CONFIG Config = {
 };
 ```
 
-## File Size Limits
+### File Size Limits
 
 | File Size | Transfer Method  | Notes                               |
 | --------- | ---------------- | ----------------------------------- |
@@ -288,7 +288,7 @@ It generates an in-memory self-signed certificate and echoes back any data recei
 
 ## Test Results
 
-## All tests passed successfully with the following metrics
+### All tests passed successfully with the following metrics
 
 | Test Category          | Tests | Status |
 | ---------------------- | ----- | ------ |
