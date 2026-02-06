@@ -404,12 +404,12 @@ VOID TestMultipleFilesUpload(VOID)
     if (!File1Data) return;
     RtlFillMemory(File1Data, 512, 0x11);
 
-    PVOID File2Data = ExAllocatePoolWithTag(NonPagedPool, 1024, 'tseT');
+    PVOID File2Data = ExAllocatePoolWithTag(NonPagedPool, 5 * 1024 * 1024, 'tseT');
     if (!File2Data) {
         ExFreePoolWithTag(File1Data, 'tseT');
         return;
     }
-    RtlFillMemory(File2Data, 1024, 0x22);
+    RtlFillMemory(File2Data, 5 * 1024 * 1024, 0x22);
 
     KHTTP_FILE Files[2] = {
         {
@@ -424,7 +424,7 @@ VOID TestMultipleFilesUpload(VOID)
             .FileName = "document2.bin",
             .ContentType = "application/octet-stream",
             .Data = File2Data,
-            .DataLength = 1024
+            .DataLength = 5 * 1024 * 1024
         }
     };
 
@@ -482,17 +482,17 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath) 
     KhttpGlobalInit();
 
     // Low-level tests
-    //TestDns();
-    //TestTls();
-    //TestDtls();
+    TestDns();
+    TestTls();
+    TestDtls();
 
     // HTTP tests (plain TCP)
-    //TestHttp();
-    //TestRestApi();
+    TestHttp();
+    TestRestApi();
 
     // HTTPS tests (TLS)
-    //TestHttps();
-    //TestRestApiHttps();
+    TestHttps();
+    TestRestApiHttps();
 
     // HTTP tests multipart
     TestFileUpload();

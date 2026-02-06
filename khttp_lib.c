@@ -82,6 +82,8 @@ NTSTATUS KhttpGlobalInit(VOID) {
         return Status;
     }
 
+    KdnsInitializeCache();
+
     g_Initialized = TRUE;
     DbgPrint("[KHTTP] Initialized\n");
     return STATUS_SUCCESS;
@@ -91,6 +93,7 @@ VOID KhttpGlobalCleanup(VOID) {
     if (!g_Initialized) return;
 
     KtlsGlobalCleanup();
+    KdnsCleanupCache();
     KdnsGlobalCleanup();
     g_Initialized = FALSE;
     DbgPrint("[KHTTP] Cleaned up\n");
@@ -403,7 +406,7 @@ NTSTATUS KhttpRequest(
     }
     else {
         // Resolve via DNS
-        Status = KdnsResolve(Hostname, Cfg->DnsServerIp, Cfg->TimeoutMs, &HostIp);
+        Status = KdnsResolveWithCache(Hostname, Cfg->DnsServerIp, Cfg->TimeoutMs, &HostIp);
         if (!NT_SUCCESS(Status)) {
             DbgPrint("[KHTTP] DNS resolution failed: 0x%x\n", Status);
             goto Cleanup;
