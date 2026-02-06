@@ -7,14 +7,6 @@
 #define DNS_TYPE_CNAME  5   // CNAME record (Canonical name/alias)
 #define DNS_MAX_CNAME_DEPTH 10  // Prevent infinite loops
 
-// Enhanced resolve function with CNAME following
-NTSTATUS KdnsResolveWithCname(
-    _In_ PCHAR Hostname,
-    _In_ ULONG DnsServer,
-    _In_ ULONG TimeoutMs,
-    _Out_ PULONG IpAddress
-);
-
 // Initialize the DNS library (Allocators)
 NTSTATUS KdnsGlobalInit(void);
 
@@ -37,5 +29,16 @@ NTSTATUS KdnsResolve(
 #ifndef INETADDR
 #define INETADDR(a, b, c, d) ((a) + ((b)<<8) + ((c)<<16) + ((d)<<24))
 #endif
+
+// DNS Cache functions
+VOID KdnsInitializeCache(VOID);
+VOID KdnsCleanupCache(VOID);
+
+NTSTATUS KdnsResolveWithCache(
+    _In_ PCHAR Hostname,
+    _In_ ULONG DnsServerIp,
+    _In_ ULONG TimeoutMs,
+    _Out_ PULONG ResolvedIp
+);
 
 #endif // _KDNS_LIB_H_

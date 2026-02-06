@@ -304,6 +304,226 @@ VOID TestRestApiHttps(void) {
     }
 }
 
+// TEST: One file upload
+VOID TestFileUpload(VOID)
+{
+    PVOID FileData = ExAllocatePoolWithTag(NonPagedPool, 1024, 'tseT');
+    if (!FileData) return;
+
+    RtlFillMemory(FileData, 1024, 0xAA);
+
+    KHTTP_FILE File = {
+        .FieldName = "document",
+        .FileName = "test.bin",
+        .ContentType = "application/octet-stream",
+        .Data = FileData,
+        .DataLength = 1024
+    };
+
+    PKHTTP_RESPONSE Response = NULL;
+    NTSTATUS Status = KhttpPostMultipart(
+        "https://httpbin.org/post",
+        "Authorization: Bearer token123\r\n",
+        NULL,           // No form fields
+        0,
+        &File,
+        1,              // One file
+        NULL,           // Default config
+        &Response
+    );
+
+    if (NT_SUCCESS(Status) && Response) {
+        DbgPrint("[KHTTP] Upload status: %lu\n", Response->StatusCode);
+        if (Response->Body) {
+            DbgPrint("[KHTTP] Response body length: %lu\n", Response->BodyLength);
+        }
+        KhttpFreeResponse(Response);
+    }
+    else {
+        DbgPrint("[KHTTP] Upload failed: 0x%08X\n", Status);
+    }
+
+    ExFreePoolWithTag(FileData, 'tseT');
+}
+
+// TEST: Upload file with form
+VOID TestFileUploadWithForm(VOID)
+{
+    PVOID FileData = ExAllocatePoolWithTag(NonPagedPool, 2048, 'tseT');
+    if (!FileData) return;
+
+    RtlFillMemory(FileData, 2048, 0xBB);
+
+    KHTTP_FILE File = {
+        .FieldName = "image",
+        .FileName = "photo.jpg",
+        .ContentType = "image/jpeg",
+        .Data = FileData,
+        .DataLength = 2048
+    };
+
+    KHTTP_FORM_FIELD Fields[2] = {
+        {.Name = "title", .Value = "My Photo" },
+        {.Name = "description", .Value = "Test upload from kernel" }
+    };
+
+    PKHTTP_RESPONSE Response = NULL;
+    NTSTATUS Status = KhttpPostMultipart(
+        "https://example.com/upload",
+        NULL,
+        Fields,
+        2,
+        &File,
+        1,
+        NULL,
+        &Response
+    );
+
+    if (NT_SUCCESS(Status) && Response) {
+        DbgPrint("[KHTTP] Upload completed: %lu\n", Response->StatusCode);
+        KhttpFreeResponse(Response);
+    }
+    else {
+        DbgPrint("[KHTTP] Upload failed: 0x%08X\n", Status);
+    }
+
+    ExFreePoolWithTag(FileData, 'tseT');
+}
+
+// TEST: Upload multiple files with progressbar
+VOID ProgressCallback(ULONG BytesSent, ULONG TotalBytes, PVOID Context)
+{
+    UNREFERENCED_PARAMETER(Context);
+    ULONG Percent = (BytesSent * 100) / TotalBytes;
+    DbgPrint("[KHTTP] Upload progress: %lu%%\n", Percent);
+}
+
+VOID TestMultipleFilesUpload(VOID)
+{
+    PVOID File1Data = ExAllocatePoolWithTag(NonPagedPool, 512, 'tseT');
+    if (!File1Data) return;
+    RtlFillMemory(File1Data, 512, 0x11);
+
+    PVOID File2Data = ExAllocatePoolWithTag(NonPagedPool, 1024, 'tseT');
+    if (!File2Data) {
+        ExFreePoolWithTag(File1Data, 'tseT');
+        return;
+    }
+    RtlFillMemory(File2Data, 1024, 0x22);
+
+    KHTTP_FILE Files[2] = {
+        {
+            .FieldName = "file1",
+            .FileName = "document1.txt",
+            .ContentType = "text/plain",
+            .Data = File1Data,
+            .DataLength = 512
+        },
+        {
+            .FieldName = "file2",
+            .FileName = "document2.bin",
+            .ContentType = "application/octet-stream",
+            .Data = File2Data,
+            .DataLength = 1024
+        }
+    };
+
+    KHTTP_CONFIG Config = {
+        .UseHttps = TRUE,
+        .TimeoutMs = 30000,
+        .UserAgent = "KernelHTTP/1.0",
+        .MaxResponseSize = 1024 * 1024,
+        .DnsServerIp = 0,
+        .ProgressCallback = ProgressCallback,
+        .CallbackContext = NULL
+    };
+
+    PKHTTP_RESPONSE Response = NULL;
+    NTSTATUS Status = KhttpPostMultipart(
+        "https://httpbin.org/post",
+        NULL,
+        NULL,
+        0,
+        Files,
+        2,
+        &Config,
+        &Response
+    );
+
+    if (NT_SUCCESS(Status) && Response) {
+        DbgPrint("[KHTTP] Multiple files uploaded: %lu\n", Response->StatusCode);
+        KhttpFreeResponse(Response);
+    }
+    else {
+        DbgPrint("[KHTTP] Upload failed: 0x%08X\n", Status);
+    }
+
+    ExFreePoolWithTag(File1Data, 'tseT');
+    ExFreePoolWithTag(File2Data, 'tseT');
+}
+
+// Test: Large file upload with chunked transfer
+VOID TestLargeFileUploadChunked(VOID)
+{
+    // 5MB file
+    ULONG FileSize = 5 * 1024 * 1024;
+
+    PVOID FileData = ExAllocatePoolWithTag(NonPagedPool, FileSize, 'tseT');
+    if (!FileData) {
+        DbgPrint("[Test] Failed to allocate %lu bytes\n", FileSize);
+        return;
+    }
+
+    // Fill with pattern for verification
+    for (ULONG i = 0; i < FileSize / 4; i++) {
+        ((ULONG*)FileData)[i] = i;
+    }
+
+    KHTTP_FILE File = {
+        .FieldName = "largefile",
+        .FileName = "large5mb.bin",
+        .ContentType = "application/octet-stream",
+        .Data = FileData,
+        .DataLength = FileSize
+    };
+
+    // Config with chunked transfer enabled
+    KHTTP_CONFIG Config = {
+        .UseHttps = TRUE,
+        .TimeoutMs = 120000,  // 2 minutes
+        .MaxResponseSize = 5 * 1024 * 1024,
+        .DnsServerIp = 0,
+        .UserAgent = "KernelHTTP/1.0",
+        .UseChunkedTransfer = TRUE,  // Enable chunked
+        .ChunkSize = 64 * 1024,      // 64KB chunks
+        .ProgressCallback = NULL,
+        .CallbackContext = NULL
+    };
+
+    PKHTTP_RESPONSE Response = NULL;
+    NTSTATUS Status = KhttpPostMultipartChunked(
+        "https://httpbin.org/post",
+        NULL,
+        NULL,
+        0,
+        &File,
+        1,
+        &Config,
+        &Response
+    );
+
+    if (NT_SUCCESS(Status) && Response) {
+        DbgPrint("[KHTTP] Large file uploaded: %lu (size: %lu bytes)\n",
+            Response->StatusCode, FileSize);
+        KhttpFreeResponse(Response);
+    }
+    else {
+        DbgPrint("[KHTTP] Large file upload failed: 0x%08X\n", Status);
+    }
+
+    ExFreePoolWithTag(FileData, 'tseT');
+}
+
 // =============================================================
 // DRIVER ENTRY
 // =============================================================
@@ -334,6 +554,18 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath) 
     // HTTPS tests (TLS)
     TestHttps();
     TestRestApiHttps();
+
+    // HTTP tests multipart
+    TestFileUpload();
+    // Delay between tests
+    KhttpSleep(2000); // 2 seconds
+    TestFileUploadWithForm();
+    // Delay between tests
+    KhttpSleep(2000); // 2 seconds
+    TestMultipleFilesUpload();
+    // Delay between tests
+    KhttpSleep(2000); // 2 seconds
+    TestLargeFileUploadChunked();
 
     DbgPrint("\n[Driver] Tests complete\n");
 

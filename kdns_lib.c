@@ -3,6 +3,31 @@
 #include <tdikrnl.h>
 #include <ntstrsafe.h>
 
+// =============================================================
+// DNS CACHE
+// =============================================================
+
+typedef struct _DNS_CACHE_ENTRY {
+    CHAR Hostname[256];
+    ULONG IpAddress;
+    LARGE_INTEGER Timestamp;
+    BOOLEAN Valid;
+} DNS_CACHE_ENTRY, * PDNS_CACHE_ENTRY;
+
+#define DNS_CACHE_SIZE 32
+#define DNS_CACHE_TTL_SECONDS 300 // 5 minutes
+
+static DNS_CACHE_ENTRY g_DnsCache[DNS_CACHE_SIZE] = { 0 };
+static KSPIN_LOCK g_DnsCacheLock;
+static BOOLEAN g_DnsCacheInitialized = FALSE;
+
+// Port management for DNS requests
+static volatile LONG g_LastDnsPort = 50000;
+
+// =============================================================
+// TDI & NETWORK
+// =============================================================
+
 #define KDNS_TAG 'DNSk'
 #define UDP_DEVICE_NAME L"\\Device\\Udp"
 #define HTONS(a) (((0xFF&(a))<<8) + ((0xFF00&(a))>>8))
@@ -126,14 +151,127 @@ static ULONG KdnsParseName(PUCHAR Start, PUCHAR Ptr, PUCHAR End, PCHAR OutName, 
 }
 
 // =============================================================
+// DNS CACHE API
+// =============================================================
+
+// Get unique port for DNS request
+USHORT KdnsGetUniquePort(VOID)
+{
+    LONG LocalPort = InterlockedIncrement(&g_LastDnsPort);
+    if (LocalPort > 60000) {
+        InterlockedExchange(&g_LastDnsPort, 50000);
+        LocalPort = 50000;
+    }
+    return (USHORT)LocalPort;
+}
+
+// Initialize DNS cache
+VOID KdnsInitializeCache(VOID)
+{
+    if (!g_DnsCacheInitialized) {
+        KeInitializeSpinLock(&g_DnsCacheLock);
+        RtlZeroMemory(g_DnsCache, sizeof(g_DnsCache));
+        g_DnsCacheInitialized = TRUE;
+        DbgPrint("KDNS: Cache initialized\n");
+    }
+}
+
+// Cleanup DNS cache
+VOID KdnsCleanupCache(VOID)
+{
+    if (g_DnsCacheInitialized) {
+        KIRQL OldIrql;
+        KeAcquireSpinLock(&g_DnsCacheLock, &OldIrql);
+        RtlZeroMemory(g_DnsCache, sizeof(g_DnsCache));
+        KeReleaseSpinLock(&g_DnsCacheLock, OldIrql);
+        g_DnsCacheInitialized = FALSE;
+        DbgPrint("KDNS: Cache cleaned up\n");
+    }
+}
+
+// Lookup DNS cache
+static BOOLEAN KdnsLookupCache(_In_ PCHAR Hostname, _Out_ PULONG IpAddress)
+{
+    if (!g_DnsCacheInitialized || !Hostname || !IpAddress) {
+        return FALSE;
+    }
+
+    KIRQL OldIrql;
+    LARGE_INTEGER CurrentTime;
+    KeQuerySystemTime(&CurrentTime);
+
+    KeAcquireSpinLock(&g_DnsCacheLock, &OldIrql);
+
+    for (ULONG i = 0; i < DNS_CACHE_SIZE; i++) {
+        if (g_DnsCache[i].Valid && _stricmp(g_DnsCache[i].Hostname, Hostname) == 0) {
+            LARGE_INTEGER Elapsed;
+            Elapsed.QuadPart = (CurrentTime.QuadPart - g_DnsCache[i].Timestamp.QuadPart) / 10000000LL;
+
+            if (Elapsed.QuadPart < DNS_CACHE_TTL_SECONDS) {
+                *IpAddress = g_DnsCache[i].IpAddress;
+                KeReleaseSpinLock(&g_DnsCacheLock, OldIrql);
+                DbgPrint("KDNS: Cache hit for %s -> %08X\n", Hostname, *IpAddress);
+                return TRUE;
+            }
+            else {
+                g_DnsCache[i].Valid = FALSE;
+            }
+        }
+    }
+
+    KeReleaseSpinLock(&g_DnsCacheLock, OldIrql);
+    return FALSE;
+}
+
+// Update DNS cache
+static VOID KdnsUpdateCache(_In_ PCHAR Hostname, _In_ ULONG IpAddress)
+{
+    if (!g_DnsCacheInitialized || !Hostname) {
+        return;
+    }
+
+    KIRQL OldIrql;
+    LARGE_INTEGER CurrentTime;
+    KeQuerySystemTime(&CurrentTime);
+
+    KeAcquireSpinLock(&g_DnsCacheLock, &OldIrql);
+
+    ULONG OldestIndex = 0;
+    LARGE_INTEGER OldestTime = g_DnsCache[0].Timestamp;
+
+    for (ULONG i = 0; i < DNS_CACHE_SIZE; i++) {
+        if (!g_DnsCache[i].Valid) {
+            OldestIndex = i;
+            break;
+        }
+        if (g_DnsCache[i].Timestamp.QuadPart < OldestTime.QuadPart) {
+            OldestTime = g_DnsCache[i].Timestamp;
+            OldestIndex = i;
+        }
+    }
+
+    RtlStringCchCopyA(g_DnsCache[OldestIndex].Hostname, 256, Hostname);
+    g_DnsCache[OldestIndex].IpAddress = IpAddress;
+    g_DnsCache[OldestIndex].Timestamp = CurrentTime;
+    g_DnsCache[OldestIndex].Valid = TRUE;
+
+    KeReleaseSpinLock(&g_DnsCacheLock, OldIrql);
+    DbgPrint("KDNS: Cached %s -> %08X\n", Hostname, IpAddress);
+}
+
+// =============================================================
 // TDI UDP ENGINE
 // =============================================================
 
-static NTSTATUS KdnsSendAndRecv(
+static NTSTATUS KdnsSendAndRecvWithPort(
     ULONG ServerIp,
-    PVOID ReqData, ULONG ReqLen,
-    PVOID RespBuf, ULONG RespMax, PULONG RespLen,
-    ULONG TimeoutMs
+    PVOID ReqData,
+    ULONG ReqLen,
+    PVOID RespBuf,
+    ULONG RespMax,
+    PULONG RespLen,
+    ULONG TimeoutMs,
+    USHORT LocalPort
 ) {
     if (KeGetCurrentIrql() > PASSIVE_LEVEL) {
         DbgPrint("KDNS: [Error] Called at IRQL > PASSIVE_LEVEL\n");
@@ -151,7 +289,7 @@ static NTSTATUS KdnsSendAndRecv(
     KEVENT Event;
     PMDL Mdl;
 
-    // 1. Open UDP Address
+    // 1. Open UDP Address with SPECIFIC LOCAL PORT
     UCHAR EaBuf[sizeof(FILE_FULL_EA_INFORMATION) + sizeof(TdiTransportAddress) + sizeof(TA_IP_ADDRESS)] = { 0 };
     PFILE_FULL_EA_INFORMATION Ea = (PFILE_FULL_EA_INFORMATION)EaBuf;
     PTA_IP_ADDRESS TaIp;
@@ -168,11 +306,16 @@ static NTSTATUS KdnsSendAndRecv(
     TaIp->Address[0].AddressLength = TDI_ADDRESS_LENGTH_IP;
     TaIp->Address[0].AddressType = TDI_ADDRESS_TYPE_IP;
 
+    // Bind to specific local port
+    TaIp->Address[0].Address[0].sin_port = HTONS(LocalPort);  // Use unique port
+    TaIp->Address[0].Address[0].in_addr = 0;  // INADDR_ANY
+    DbgPrint("KDNS: Binding to local port %u\n", LocalPort);
+
     Status = ZwCreateFile(&AddrHandle, FILE_GENERIC_READ | FILE_GENERIC_WRITE, &Attr, &IoStatus, NULL, 0, 0,
         FILE_CREATE, 0, Ea, sizeof(EaBuf));
 
     if (!NT_SUCCESS(Status)) {
-        DbgPrint("KDNS: [Error] ZwCreateFile failed: 0x%08X\n", Status);
+        DbgPrint("KDNS: [Error] ZwCreateFile failed: 0x%08X (port %u)\n", Status, LocalPort);
         return Status;
     }
 
@@ -187,20 +330,32 @@ static NTSTATUS KdnsSendAndRecv(
     // 2. SEND
     KeInitializeEvent(&Event, NotificationEvent, FALSE);
     Irp = TdiBuildInternalDeviceControlIrp(TDI_SEND_DATAGRAM, DevObj, AddrObj, &Event, &IoStatus);
-    if (!Irp) { Status = STATUS_INSUFFICIENT_RESOURCES; goto cleanup; }
+    if (!Irp) {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto cleanup;
+    }
 
     Mdl = IoAllocateMdl(ReqData, ReqLen, FALSE, FALSE, NULL);
-    if (!Mdl) { IoFreeIrp(Irp); Status = STATUS_INSUFFICIENT_RESOURCES; goto cleanup; }
+    if (!Mdl) {
+        IoFreeIrp(Irp);
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto cleanup;
+    }
     MmBuildMdlForNonPagedPool(Mdl);
 
     PTDI_CONNECTION_INFORMATION ConnInfo = KdnsAlloc(sizeof(TDI_CONNECTION_INFORMATION) + sizeof(TA_IP_ADDRESS));
-    if (!ConnInfo) { IoFreeMdl(Mdl); IoFreeIrp(Irp); Status = STATUS_INSUFFICIENT_RESOURCES; goto cleanup; }
+    if (!ConnInfo) {
+        IoFreeMdl(Mdl);
+        IoFreeIrp(Irp);
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto cleanup;
+    }
 
     PTA_IP_ADDRESS IP = (PTA_IP_ADDRESS)(ConnInfo + 1);
     IP->TAAddressCount = 1;
     IP->Address[0].AddressLength = TDI_ADDRESS_LENGTH_IP;
     IP->Address[0].AddressType = TDI_ADDRESS_TYPE_IP;
-    IP->Address[0].Address[0].sin_port = HTONS(53);
+    IP->Address[0].Address[0].sin_port = HTONS(53);  // DNS server port
     IP->Address[0].Address[0].in_addr = ServerIp;
     ConnInfo->RemoteAddressLength = sizeof(TA_IP_ADDRESS);
     ConnInfo->RemoteAddress = IP;
@@ -214,15 +369,27 @@ static NTSTATUS KdnsSendAndRecv(
     }
     KdnsFree(ConnInfo);
 
-    if (!NT_SUCCESS(Status)) goto cleanup;
+    if (!NT_SUCCESS(Status)) {
+        DbgPrint("KDNS: [Error] Send failed: 0x%08X (port %u)\n", Status, LocalPort);
+        goto cleanup;
+    }
+
+    DbgPrint("KDNS: Sent %lu bytes from port %u\n", ReqLen, LocalPort);
 
     // 3. RECEIVE
     KeClearEvent(&Event);
     Irp = TdiBuildInternalDeviceControlIrp(TDI_RECEIVE_DATAGRAM, DevObj, AddrObj, &Event, &IoStatus);
-    if (!Irp) { Status = STATUS_INSUFFICIENT_RESOURCES; goto cleanup; }
+    if (!Irp) {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto cleanup;
+    }
 
     Mdl = IoAllocateMdl(RespBuf, RespMax, FALSE, FALSE, NULL);
-    if (!Mdl) { IoFreeIrp(Irp); Status = STATUS_INSUFFICIENT_RESOURCES; goto cleanup; }
+    if (!Mdl) {
+        IoFreeIrp(Irp);
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto cleanup;
+    }
     MmBuildMdlForNonPagedPool(Mdl);
 
     TdiBuildReceiveDatagram(Irp, DevObj, AddrObj, NULL, NULL, Mdl, RespMax, NULL, NULL, NULL);
@@ -235,6 +402,7 @@ static NTSTATUS KdnsSendAndRecv(
         Status = KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, &Timeout);
 
         if (Status == STATUS_TIMEOUT) {
+            DbgPrint("KDNS: [Error] Receive timeout (port %u)\n", LocalPort);
             IoCancelIrp(Irp);
             KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
             Status = STATUS_IO_TIMEOUT;
@@ -246,12 +414,44 @@ static NTSTATUS KdnsSendAndRecv(
 
     if (NT_SUCCESS(Status)) {
         *RespLen = (ULONG)IoStatus.Information;
+        DbgPrint("KDNS: Received %lu bytes on port %u\n", *RespLen, LocalPort);
+    }
+    else {
+        DbgPrint("KDNS: [Error] Receive failed: 0x%08X (port %u)\n", Status, LocalPort);
     }
 
 cleanup:
     ObDereferenceObject(AddrObj);
     ZwClose(AddrHandle);
+
+    // Delay after closing to release port
+    LARGE_INTEGER Delay;
+    Delay.QuadPart = -10000LL * 150; // 150ms delay
+    KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+    DbgPrint("KDNS: Port %u released\n", LocalPort);
+
     return Status;
+}
+
+static NTSTATUS KdnsSendAndRecv(
+    ULONG ServerIp,
+    PVOID ReqData,
+    ULONG ReqLen,
+    PVOID RespBuf,
+    ULONG RespMax,
+    PULONG RespLen,
+    ULONG TimeoutMs
+) {
+    return KdnsSendAndRecvWithPort(
+        ServerIp,
+        ReqData,
+        ReqLen,
+        RespBuf,
+        RespMax,
+        RespLen,
+        TimeoutMs,
+        KdnsGetUniquePort()
+    );
 }
 
 // =============================================================
@@ -263,6 +463,9 @@ static NTSTATUS KdnsResolveInternal(PCHAR Hostname, ULONG DnsServerIp, ULONG Tim
         DbgPrint("KDNS: [Error] CNAME chain too deep (>%d)\n", DNS_MAX_CNAME_DEPTH);
         return STATUS_TOO_MANY_LINKS;
     }
+
+    USHORT LocalPort = KdnsGetUniquePort();
+    DbgPrint("KDNS: Resolving %s using local port %u (depth: %lu)\n", Hostname, LocalPort, Depth);
 
     PVOID Req = KdnsAlloc(512);
     PVOID Res = KdnsAlloc(512);
@@ -294,10 +497,27 @@ static NTSTATUS KdnsResolveInternal(PCHAR Hostname, ULONG DnsServerIp, ULONG Tim
     ReqLen += 4;
 
     // Send & Receive
-    Status = KdnsSendAndRecv(DnsServerIp, Req, ReqLen, Res, 512, &ResLen, TimeoutMs);
+    Status = KdnsSendAndRecvWithPort(
+        DnsServerIp,
+        Req,
+        ReqLen,
+        Res,
+        512,
+        &ResLen,
+        TimeoutMs,
+        LocalPort
+    );
     if (!NT_SUCCESS(Status)) {
+        DbgPrint("KDNS: Send/Recv failed for %s: 0x%08X\n", Hostname, Status);
+
         KdnsFree(Req);
         KdnsFree(Res);
+
+        // Delay before returning on error
+        LARGE_INTEGER Delay;
+        Delay.QuadPart = -10000LL * 100; // 100ms
+        KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+
         return Status;
     }
 
@@ -410,6 +630,11 @@ static NTSTATUS KdnsResolveInternal(PCHAR Hostname, ULONG DnsServerIp, ULONG Tim
             KdnsFree(Req);
             KdnsFree(Res);
 
+            // Delay before recursion
+            LARGE_INTEGER Delay;
+            Delay.QuadPart = -10000LL * 100; // 100ms
+            KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+
             return KdnsResolveInternal(CnameTarget, DnsServerIp, TimeoutMs, ResolvedIp, Depth + 1);
         }
         else {
@@ -425,6 +650,13 @@ static NTSTATUS KdnsResolveInternal(PCHAR Hostname, ULONG DnsServerIp, ULONG Tim
 cleanup:
     KdnsFree(Req);
     KdnsFree(Res);
+
+    // Delay before returning to allow port release
+    LARGE_INTEGER Delay;
+    Delay.QuadPart = -10000LL * 200; // 200ms delay
+    KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+    DbgPrint("KDNS: Cleanup completed for %s (status: 0x%08X)\n", Hostname, Status);
+
     return Status;
 }
 
@@ -443,4 +675,35 @@ VOID KdnsGlobalCleanup(void) { }
 
 NTSTATUS KdnsResolve(PCHAR Hostname, ULONG DnsServerIp, ULONG TimeoutMs, PULONG ResolvedIp) {
     return KdnsResolveInternal(Hostname, DnsServerIp, TimeoutMs, ResolvedIp, 0);
+}
+
+NTSTATUS KdnsResolveWithCache(
+    _In_ PCHAR Hostname,
+    _In_ ULONG DnsServerIp,
+    _In_ ULONG TimeoutMs,
+    _Out_ PULONG ResolvedIp
+)
+{
+    if (!Hostname || !ResolvedIp) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    *ResolvedIp = 0;
+
+    // Check cache
+    if (KdnsLookupCache(Hostname, ResolvedIp)) {
+        return STATUS_SUCCESS;
+    }
+
+    DbgPrint("KDNS: Cache miss for %s, performing DNS query\n", Hostname);
+
+    // If not in cache, make DNS request
+    NTSTATUS Status = KdnsResolve(Hostname, DnsServerIp, TimeoutMs, ResolvedIp);
+
+    if (NT_SUCCESS(Status) && *ResolvedIp != 0) {
+        // Store in cache
+        KdnsUpdateCache(Hostname, *ResolvedIp);
+    }
+
+    return Status;
 }

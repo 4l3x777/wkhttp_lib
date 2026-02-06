@@ -3,7 +3,12 @@
 #include "kdns_lib.h"
 #include <ntstrsafe.h>
 
+// Memory pool tag for http requests operations
 #define KHTTP_TAG 'pttH'
+
+// Memory pool tag for multipart operations
+#define KHTTP_MULTIPART_TAG 'tpmK'
+
 #define DEFAULT_TIMEOUT 10000
 #define DEFAULT_MAX_RESPONSE 1048576  // 1MB
 #define DEFAULT_DNS_SERVER INETADDR(8, 8, 8, 8)
@@ -17,6 +22,15 @@ static const char* MethodNames[] = {
 };
 
 // --- Helper: String Functions ---
+
+// Http delay function
+VOID KhttpSleep(ULONG Milliseconds)
+{
+    LARGE_INTEGER Interval;
+    Interval.QuadPart = -10000LL * Milliseconds; // Negative for relative time
+    KeDelayExecutionThread(KernelMode, FALSE, &Interval);
+}
+
 ULONG KhttpStrLen(PCHAR Str) {
     ULONG Len = 0;
     if (!Str) return 0;
@@ -68,6 +82,8 @@ NTSTATUS KhttpGlobalInit(VOID) {
         return Status;
     }
 
+    KdnsInitializeCache();
+
     g_Initialized = TRUE;
     DbgPrint("[KHTTP] Initialized\n");
     return STATUS_SUCCESS;
@@ -77,6 +93,7 @@ VOID KhttpGlobalCleanup(VOID) {
     if (!g_Initialized) return;
 
     KtlsGlobalCleanup();
+    KdnsCleanupCache();
     KdnsGlobalCleanup();
     g_Initialized = FALSE;
     DbgPrint("[KHTTP] Cleaned up\n");
@@ -389,7 +406,7 @@ NTSTATUS KhttpRequest(
     }
     else {
         // Resolve via DNS
-        Status = KdnsResolve(Hostname, Cfg->DnsServerIp, Cfg->TimeoutMs, &HostIp);
+        Status = KdnsResolveWithCache(Hostname, Cfg->DnsServerIp, Cfg->TimeoutMs, &HostIp);
         if (!NT_SUCCESS(Status)) {
             DbgPrint("[KHTTP] DNS resolution failed: 0x%x\n", Status);
             goto Cleanup;
@@ -566,4 +583,900 @@ VOID KhttpFreeResponse(_In_ PKHTTP_RESPONSE Response) {
         ExFreePoolWithTag(Response->Body, KHTTP_TAG);
 
     ExFreePoolWithTag(Response, KHTTP_TAG);
+}
+
+// --- Multipart operations ---
+
+// Simple hash function for entropy mixing
+ULONG64 KhttpSimpleHash(ULONG64 Value, ULONG Iteration)
+{
+    Value ^= Value >> 33;
+    Value *= 0xFF51AFD7ED558CCDULL;
+    Value ^= Value >> 33;
+    Value *= 0xC4CEB9FE1A85EC53ULL;
+    Value ^= Value >> 33;
+    Value ^= (ULONG64)Iteration * 0x9E3779B97F4A7C15ULL;
+    return Value;
+}
+
+// Generate cryptographically-strong random boundary
+PCHAR KhttpGenerateBoundary(VOID)
+{
+    PCHAR Boundary = (PCHAR)ExAllocatePoolWithTag(
+        NonPagedPool,
+        80,
+        KHTTP_MULTIPART_TAG
+    );
+
+    if (!Boundary) {
+        return NULL;
+    }
+
+    // Collect maximum entropy
+    LARGE_INTEGER TickCount, SystemTime, PerformanceCounter;
+    ULONG64 InterruptTime;
+    ULONG ProcessorNumber;
+    PVOID StackAddr = &Boundary;
+
+    KeQueryTickCount(&TickCount);
+    KeQuerySystemTime(&SystemTime);
+    PerformanceCounter = KeQueryPerformanceCounter(NULL);
+    InterruptTime = KeQueryInterruptTime();
+    ProcessorNumber = KeGetCurrentProcessorNumber();
+
+    // Hash all entropy sources
+    ULONG64 Hash = 0x9E3779B97F4A7C15ULL; // Initial seed (golden ratio)
+    Hash ^= KhttpSimpleHash(TickCount.QuadPart, 0);
+    Hash ^= KhttpSimpleHash(SystemTime.QuadPart, 1);
+    Hash ^= KhttpSimpleHash(PerformanceCounter.QuadPart, 2);
+    Hash ^= KhttpSimpleHash(InterruptTime, 3);
+    Hash ^= KhttpSimpleHash((ULONG64)(ULONG_PTR)StackAddr, 4);
+    Hash ^= KhttpSimpleHash((ULONG64)ProcessorNumber, 5);
+
+    // Base62 charset
+    static const CHAR Charset[] =
+        "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+
+    // Generate boundary prefix (4 dashes)
+    Boundary[0] = '-';
+    Boundary[1] = '-';
+    Boundary[2] = '-';
+    Boundary[3] = '-';
+
+    // Generate 40 random characters
+    ULONG Pos = 4;
+    for (ULONG i = 0; i < 40; i++) {
+        Hash = KhttpSimpleHash(Hash, i + 10);
+        ULONG Index = (ULONG)(Hash % 62);
+        Boundary[Pos++] = Charset[Index];
+    }
+
+    Boundary[Pos] = '\0';
+
+    return Boundary;
+}
+
+// Build multipart/form-data body
+PCHAR KhttpBuildMultipartBody(
+    _In_opt_ PKHTTP_FORM_FIELD FormFields,
+    _In_ ULONG FormFieldCount,
+    _In_opt_ PKHTTP_FILE Files,
+    _In_ ULONG FileCount,
+    _In_ PCHAR Boundary,
+    _Out_ PULONG BodyLength
+)
+{
+    if (!Boundary || !BodyLength) {
+        return NULL;
+    }
+
+    *BodyLength = 0;
+
+    // Calculate total size needed more accurately
+    ULONG TotalSize = 0;
+    ULONG i;
+    size_t BoundaryLen = strlen(Boundary);
+
+    // Size for form fields
+    for (i = 0; i < FormFieldCount; i++) {
+        if (!FormFields[i].Name || !FormFields[i].Value) {
+            continue;
+        }
+
+        size_t NameLen = strlen(FormFields[i].Name);
+        size_t ValueLen = strlen(FormFields[i].Value);
+
+        // "--" + boundary + "\r\n"
+        TotalSize += 2 + (ULONG)BoundaryLen + 2;
+        // "Content-Disposition: form-data; name=\"\"\r\n\r\n"
+        TotalSize += 40 + (ULONG)NameLen;
+        // value + "\r\n"
+        TotalSize += (ULONG)ValueLen + 2;
+    }
+
+    // Size for files
+    for (i = 0; i < FileCount; i++) {
+        if (!Files[i].FieldName || !Files[i].FileName || !Files[i].Data) {
+            continue;
+        }
+
+        size_t FieldNameLen = strlen(Files[i].FieldName);
+        size_t FileNameLen = strlen(Files[i].FileName);
+        size_t ContentTypeLen = Files[i].ContentType ?
+            strlen(Files[i].ContentType) :
+            strlen("application/octet-stream");
+
+        // "--" + boundary + "\r\n"
+        TotalSize += 2 + (ULONG)BoundaryLen + 2;
+        // "Content-Disposition: form-data; name=\"\"; filename=\"\"\r\n"
+        TotalSize += 50 + (ULONG)FieldNameLen + (ULONG)FileNameLen;
+        // "Content-Type: \r\n\r\n"
+        TotalSize += 16 + (ULONG)ContentTypeLen;
+        // File data + "\r\n"
+        TotalSize += Files[i].DataLength + 2;
+    }
+
+    // Final boundary: "--" + boundary + "--\r\n"
+    TotalSize += 2 + (ULONG)BoundaryLen + 4;
+
+    // Add safety margin
+    TotalSize += 256;
+
+    // Check if size is reasonable (max 100MB for safety)
+    if (TotalSize > 100 * 1024 * 1024) {
+        DbgPrint("[KHTTP] Multipart body too large: %lu bytes\n", TotalSize);
+        return NULL;
+    }
+
+    // Allocate buffer
+    PCHAR Body = (PCHAR)ExAllocatePoolWithTag(
+        NonPagedPool,
+        TotalSize,
+        KHTTP_MULTIPART_TAG
+    );
+
+    if (!Body) {
+        DbgPrint("[KHTTP] Failed to allocate %lu bytes for multipart body\n", TotalSize);
+        return NULL;
+    }
+
+    // Clear buffer
+    RtlZeroMemory(Body, TotalSize);
+
+    PCHAR Current = Body;
+    ULONG Remaining = TotalSize;
+    NTSTATUS Status;
+
+    // Add form fields
+    for (i = 0; i < FormFieldCount; i++) {
+        if (!FormFields[i].Name || !FormFields[i].Value) {
+            continue;
+        }
+
+        Status = RtlStringCchPrintfA(
+            Current,
+            Remaining,
+            "--%s\r\nContent-Disposition: form-data; name=\"%s\"\r\n\r\n%s\r\n",
+            Boundary,
+            FormFields[i].Name,
+            FormFields[i].Value
+        );
+
+        if (!NT_SUCCESS(Status)) {
+            DbgPrint("[KHTTP] Failed to format form field: 0x%08X\n", Status);
+            ExFreePoolWithTag(Body, KHTTP_MULTIPART_TAG);
+            return NULL;
+        }
+
+        size_t Written;
+        Status = RtlStringCchLengthA(Current, Remaining, &Written);
+        if (!NT_SUCCESS(Status)) {
+            ExFreePoolWithTag(Body, KHTTP_MULTIPART_TAG);
+            return NULL;
+        }
+
+        Current += Written;
+        Remaining -= (ULONG)Written;
+    }
+
+    // Add files
+    for (i = 0; i < FileCount; i++) {
+        if (!Files[i].FieldName || !Files[i].FileName || !Files[i].Data) {
+            continue;
+        }
+
+        PCHAR ContentType = Files[i].ContentType ?
+            Files[i].ContentType :
+            "application/octet-stream";
+
+        Status = RtlStringCchPrintfA(
+            Current,
+            Remaining,
+            "--%s\r\nContent-Disposition: form-data; name=\"%s\"; filename=\"%s\"\r\nContent-Type: %s\r\n\r\n",
+            Boundary,
+            Files[i].FieldName,
+            Files[i].FileName,
+            ContentType
+        );
+
+        if (!NT_SUCCESS(Status)) {
+            DbgPrint("[KHTTP] Failed to format file header: 0x%08X\n", Status);
+            ExFreePoolWithTag(Body, KHTTP_MULTIPART_TAG);
+            return NULL;
+        }
+
+        size_t Written;
+        Status = RtlStringCchLengthA(Current, Remaining, &Written);
+        if (!NT_SUCCESS(Status)) {
+            ExFreePoolWithTag(Body, KHTTP_MULTIPART_TAG);
+            return NULL;
+        }
+
+        Current += Written;
+        Remaining -= (ULONG)Written;
+
+        // Copy file data
+        if (Files[i].DataLength > Remaining - 2) {
+            DbgPrint("[KHTTP] Insufficient buffer for file data\n");
+            ExFreePoolWithTag(Body, KHTTP_MULTIPART_TAG);
+            return NULL;
+        }
+
+        RtlCopyMemory(Current, Files[i].Data, Files[i].DataLength);
+        Current += Files[i].DataLength;
+        Remaining -= Files[i].DataLength;
+
+        // Add CRLF after data
+        *Current++ = '\r';
+        *Current++ = '\n';
+        Remaining -= 2;
+    }
+
+    // Add final boundary
+    Status = RtlStringCchPrintfA(
+        Current,
+        Remaining,
+        "--%s--\r\n",
+        Boundary
+    );
+
+    if (!NT_SUCCESS(Status)) {
+        DbgPrint("[KHTTP] Failed to format final boundary: 0x%08X\n", Status);
+        ExFreePoolWithTag(Body, KHTTP_MULTIPART_TAG);
+        return NULL;
+    }
+
+    *BodyLength = (ULONG)(Current - Body) + (ULONG)strlen(Current);
+
+    DbgPrint("[KHTTP] Built multipart body: %lu bytes\n", *BodyLength);
+
+    return Body;
+}
+
+// Internal multipart request handler
+NTSTATUS KhttpMultipartRequest(
+    _In_ KHTTP_METHOD Method,
+    _In_ PCHAR Url,
+    _In_opt_ PCHAR Headers,
+    _In_opt_ PKHTTP_FORM_FIELD FormFields,
+    _In_ ULONG FormFieldCount,
+    _In_opt_ PKHTTP_FILE Files,
+    _In_ ULONG FileCount,
+    _In_opt_ PKHTTP_CONFIG Config,
+    _Out_ PKHTTP_RESPONSE* Response
+)
+{
+    if (!Url || !Response) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    *Response = NULL;
+
+    DbgPrint("[KHTTP] Starting multipart request to %s\n", Url);
+
+    // Generate boundary
+    PCHAR Boundary = KhttpGenerateBoundary();
+    if (!Boundary) {
+        DbgPrint("[KHTTP] Failed to generate boundary\n");
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    DbgPrint("[KHTTP] Generated boundary: %s\n", Boundary);
+
+    // Build multipart body
+    ULONG BodyLength = 0;
+    PCHAR Body = KhttpBuildMultipartBody(
+        FormFields,
+        FormFieldCount,
+        Files,
+        FileCount,
+        Boundary,
+        &BodyLength
+    );
+
+    if (!Body) {
+        DbgPrint("[KHTTP] Failed to build multipart body\n");
+        ExFreePoolWithTag(Boundary, KHTTP_MULTIPART_TAG);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    DbgPrint("[KHTTP] Built multipart body: %lu bytes\n", BodyLength);
+
+    // Build Content-Type header with boundary
+    ULONG ContentTypeLen = 256;
+    PCHAR ContentTypeHeader = (PCHAR)ExAllocatePoolWithTag(
+        NonPagedPool,
+        ContentTypeLen,
+        KHTTP_MULTIPART_TAG
+    );
+
+    if (!ContentTypeHeader) {
+        DbgPrint("[KHTTP] Failed to allocate Content-Type header\n");
+        ExFreePoolWithTag(Body, KHTTP_MULTIPART_TAG);
+        ExFreePoolWithTag(Boundary, KHTTP_MULTIPART_TAG);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    NTSTATUS Status = RtlStringCchPrintfA(
+        ContentTypeHeader,
+        ContentTypeLen,
+        "Content-Type: multipart/form-data; boundary=%s\r\n",
+        Boundary
+    );
+
+    if (!NT_SUCCESS(Status)) {
+        DbgPrint("[KHTTP] Failed to format Content-Type: 0x%08X\n", Status);
+        ExFreePoolWithTag(ContentTypeHeader, KHTTP_MULTIPART_TAG);
+        ExFreePoolWithTag(Body, KHTTP_MULTIPART_TAG);
+        ExFreePoolWithTag(Boundary, KHTTP_MULTIPART_TAG);
+        return Status;
+    }
+
+    // Combine with user headers
+    ULONG TotalHeaderLen = (ULONG)strlen(ContentTypeHeader);
+    if (Headers) {
+        TotalHeaderLen += (ULONG)strlen(Headers);
+    }
+    TotalHeaderLen += 1; // Null terminator
+
+    PCHAR CombinedHeaders = (PCHAR)ExAllocatePoolWithTag(
+        NonPagedPool,
+        TotalHeaderLen,
+        KHTTP_MULTIPART_TAG
+    );
+
+    if (!CombinedHeaders) {
+        DbgPrint("[KHTTP] Failed to allocate combined headers\n");
+        ExFreePoolWithTag(ContentTypeHeader, KHTTP_MULTIPART_TAG);
+        ExFreePoolWithTag(Body, KHTTP_MULTIPART_TAG);
+        ExFreePoolWithTag(Boundary, KHTTP_MULTIPART_TAG);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    Status = RtlStringCchCopyA(CombinedHeaders, TotalHeaderLen, ContentTypeHeader);
+    if (NT_SUCCESS(Status) && Headers) {
+        Status = RtlStringCchCatA(CombinedHeaders, TotalHeaderLen, Headers);
+    }
+
+    if (!NT_SUCCESS(Status)) {
+        DbgPrint("[KHTTP] Failed to combine headers: 0x%08X\n", Status);
+        ExFreePoolWithTag(CombinedHeaders, KHTTP_MULTIPART_TAG);
+        ExFreePoolWithTag(ContentTypeHeader, KHTTP_MULTIPART_TAG);
+        ExFreePoolWithTag(Body, KHTTP_MULTIPART_TAG);
+        ExFreePoolWithTag(Boundary, KHTTP_MULTIPART_TAG);
+        return Status;
+    }
+
+    DbgPrint("[KHTTP] Making HTTP request\n");
+
+    // Make the request
+    Status = KhttpRequest(
+        Method,
+        Url,
+        CombinedHeaders,
+        Body,
+        Config,
+        Response
+    );
+
+    DbgPrint("[KHTTP] Request completed: 0x%08X\n", Status);
+
+    // Cleanup
+    ExFreePoolWithTag(CombinedHeaders, KHTTP_MULTIPART_TAG);
+    ExFreePoolWithTag(ContentTypeHeader, KHTTP_MULTIPART_TAG);
+    ExFreePoolWithTag(Body, KHTTP_MULTIPART_TAG);
+    ExFreePoolWithTag(Boundary, KHTTP_MULTIPART_TAG);
+
+    return Status;
+}
+
+// POST multipart request
+NTSTATUS KhttpPostMultipart(
+    _In_ PCHAR Url,
+    _In_opt_ PCHAR Headers,
+    _In_opt_ PKHTTP_FORM_FIELD FormFields,
+    _In_ ULONG FormFieldCount,
+    _In_opt_ PKHTTP_FILE Files,
+    _In_ ULONG FileCount,
+    _In_opt_ PKHTTP_CONFIG Config,
+    _Out_ PKHTTP_RESPONSE* Response
+)
+{
+    return KhttpMultipartRequest(
+        KHTTP_POST,
+        Url,
+        Headers,
+        FormFields,
+        FormFieldCount,
+        Files,
+        FileCount,
+        Config,
+        Response
+    );
+}
+
+// PUT multipart request
+NTSTATUS KhttpPutMultipart(
+    _In_ PCHAR Url,
+    _In_opt_ PCHAR Headers,
+    _In_opt_ PKHTTP_FORM_FIELD FormFields,
+    _In_ ULONG FormFieldCount,
+    _In_opt_ PKHTTP_FILE Files,
+    _In_ ULONG FileCount,
+    _In_opt_ PKHTTP_CONFIG Config,
+    _Out_ PKHTTP_RESPONSE* Response
+)
+{
+    return KhttpMultipartRequest(
+        KHTTP_PUT,
+        Url,
+        Headers,
+        FormFields,
+        FormFieldCount,
+        Files,
+        FileCount,
+        Config,
+        Response
+    );
+}
+
+// Decode chunked transfer encoding
+NTSTATUS KhttpDecodeChunked(
+    _In_ PCHAR ChunkedData,
+    _In_ ULONG ChunkedLength,
+    _Out_ PCHAR* DecodedData,
+    _Out_ PULONG DecodedLength
+)
+{
+    if (!ChunkedData || !DecodedData || !DecodedLength) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    // Allocate buffer for decoded data (worst case: same size)
+    PCHAR Decoded = (PCHAR)ExAllocatePoolWithTag(
+        NonPagedPool,
+        ChunkedLength,
+        KHTTP_MULTIPART_TAG
+    );
+
+    if (!Decoded) {
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    PCHAR Source = ChunkedData;
+    PCHAR Dest = Decoded;
+    ULONG TotalDecoded = 0;
+
+    while (TRUE) {
+        // Parse chunk size (hex number followed by \r\n)
+        ULONG ChunkSize = 0;
+        while (*Source != '\r' && Source < ChunkedData + ChunkedLength) {
+            char c = *Source++;
+            if (c >= '0' && c <= '9') {
+                ChunkSize = ChunkSize * 16 + (c - '0');
+            }
+            else if (c >= 'a' && c <= 'f') {
+                ChunkSize = ChunkSize * 16 + (c - 'a' + 10);
+            }
+            else if (c >= 'A' && c <= 'F') {
+                ChunkSize = ChunkSize * 16 + (c - 'A' + 10);
+            }
+            else {
+                break; // Ignore chunk extensions
+            }
+        }
+
+        // Skip \r\n
+        if (*Source == '\r') Source++;
+        if (*Source == '\n') Source++;
+
+        // If chunk size is 0, we're done
+        if (ChunkSize == 0) {
+            break;
+        }
+
+        // Copy chunk data
+        if (Source + ChunkSize > ChunkedData + ChunkedLength) {
+            ExFreePoolWithTag(Decoded, KHTTP_MULTIPART_TAG);
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        RtlCopyMemory(Dest, Source, ChunkSize);
+        Dest += ChunkSize;
+        Source += ChunkSize;
+        TotalDecoded += ChunkSize;
+
+        // Skip trailing \r\n
+        if (*Source == '\r') Source++;
+        if (*Source == '\n') Source++;
+    }
+
+    *DecodedData = Decoded;
+    *DecodedLength = TotalDecoded;
+
+    return STATUS_SUCCESS;
+}
+
+// Helper to send data (handles both TLS and plain TCP)
+static NTSTATUS KhttpSendData(
+    _In_ PKTLS_SESSION Session,
+    _In_ PVOID Data,
+    _In_ ULONG Length,
+    _Out_opt_ PULONG BytesSent
+)
+{
+    ULONG Sent = 0;
+    NTSTATUS Status = KtlsSend(Session, Data, Length, &Sent);
+
+    if (BytesSent) {
+        *BytesSent = Sent;
+    }
+
+    return Status;
+}
+
+// Send data in chunks with Transfer-Encoding: chunked
+static NTSTATUS KhttpSendChunked(
+    _In_ PKTLS_SESSION Session,
+    _In_ PVOID Data,
+    _In_ ULONG TotalLength,
+    _In_ ULONG ChunkSize,
+    _In_opt_ PKHTTP_PROGRESS_CALLBACK ProgressCallback,
+    _In_opt_ PVOID CallbackContext
+)
+{
+    NTSTATUS Status = STATUS_SUCCESS;
+    ULONG BytesSent = 0;
+    UCHAR* DataPtr = (UCHAR*)Data;
+
+    if (ChunkSize == 0 || ChunkSize > KHTTP_MAX_CHUNK_SIZE) {
+        ChunkSize = KHTTP_CHUNK_SIZE;
+    }
+
+    DbgPrint("[KHTTP] Starting chunked transfer: %lu bytes (chunk: %lu)\n",
+        TotalLength, ChunkSize);
+
+    while (BytesSent < TotalLength) {
+        ULONG CurrentChunkSize = min(ChunkSize, TotalLength - BytesSent);
+
+        // Build chunk header: "size_in_hex\r\n"
+        CHAR ChunkHeader[32];
+        Status = RtlStringCchPrintfA(
+            ChunkHeader,
+            sizeof(ChunkHeader),
+            "%X\r\n",
+            CurrentChunkSize
+        );
+
+        if (!NT_SUCCESS(Status)) {
+            DbgPrint("[KHTTP] Failed to format chunk header\n");
+            return STATUS_UNSUCCESSFUL;
+        }
+
+        // Send chunk header
+        Status = KhttpSendData(Session, ChunkHeader, (ULONG)strlen(ChunkHeader), NULL);
+        if (!NT_SUCCESS(Status)) {
+            DbgPrint("[KHTTP] Failed to send chunk header: 0x%08X\n", Status);
+            return Status;
+        }
+
+        // Send chunk data
+        Status = KhttpSendData(Session, DataPtr + BytesSent, CurrentChunkSize, NULL);
+        if (!NT_SUCCESS(Status)) {
+            DbgPrint("[KHTTP] Failed to send chunk data: 0x%08X\n", Status);
+            return Status;
+        }
+
+        // Send chunk trailer: "\r\n"
+        CHAR ChunkTrailer[] = "\r\n";
+        Status = KhttpSendData(Session, ChunkTrailer, 2, NULL);
+        if (!NT_SUCCESS(Status)) {
+            DbgPrint("[KHTTP] Failed to send chunk trailer: 0x%08X\n", Status);
+            return Status;
+        }
+
+        BytesSent += CurrentChunkSize;
+
+        // Progress callback
+        if (ProgressCallback) {
+            ProgressCallback(BytesSent, TotalLength, CallbackContext);
+        }
+
+        if (BytesSent % (ChunkSize * 10) == 0 || BytesSent >= TotalLength) {
+            ULONG Percent = (BytesSent * 100) / TotalLength;
+            DbgPrint("[KHTTP] Sent: %lu/%lu bytes (%lu%%)\n",
+                BytesSent, TotalLength, Percent);
+        }
+    }
+
+    // Send final chunk: "0\r\n\r\n"
+    CHAR FinalChunk[] = "0\r\n\r\n";
+    Status = KhttpSendData(Session, FinalChunk, 5, NULL);
+    if (!NT_SUCCESS(Status)) {
+        DbgPrint("[KHTTP] Failed to send final chunk: 0x%08X\n", Status);
+        return Status;
+    }
+
+    DbgPrint("[KHTTP] Chunked transfer complete: %lu bytes\n", TotalLength);
+    return STATUS_SUCCESS;
+}
+
+// Multipart request with chunked transfer support
+static NTSTATUS KhttpMultipartRequestChunked(
+    _In_ KHTTP_METHOD Method,
+    _In_ PCHAR Url,
+    _In_opt_ PCHAR Headers,
+    _In_opt_ PKHTTP_FORM_FIELD FormFields,
+    _In_ ULONG FormFieldCount,
+    _In_opt_ PKHTTP_FILE Files,
+    _In_ ULONG FileCount,
+    _In_opt_ PKHTTP_CONFIG Config,
+    _Out_ PKHTTP_RESPONSE* Response
+)
+{
+    if (!Url || !Response) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    *Response = NULL;
+
+    // Check if we should use chunked transfer
+    BOOLEAN UseChunked = FALSE;
+    ULONG ChunkSize = KHTTP_CHUNK_SIZE;
+
+    if (Config) {
+        UseChunked = Config->UseChunkedTransfer;
+        if (Config->ChunkSize > 0 && Config->ChunkSize <= KHTTP_MAX_CHUNK_SIZE) {
+            ChunkSize = Config->ChunkSize;
+        }
+    }
+
+    // Calculate total body size to decide on chunked transfer
+    ULONG TotalFileSize = 0;
+    for (ULONG i = 0; i < FileCount; i++) {
+        if (Files[i].Data && Files[i].DataLength > 0) {
+            TotalFileSize += Files[i].DataLength;
+        }
+    }
+
+    // Auto-enable chunked for large bodies (>2MB)
+    if (TotalFileSize > KHTTP_MAX_MEMORY_BODY_SIZE) {
+        UseChunked = TRUE;
+        DbgPrint("[KHTTP] Large body detected (%lu bytes), enabling chunked transfer\n",
+            TotalFileSize);
+    }
+
+    DbgPrint("[KHTTP] Starting multipart request to %s (chunked: %d)\n",
+        Url, UseChunked);
+
+    // Generate boundary
+    PCHAR Boundary = KhttpGenerateBoundary();
+    if (!Boundary) {
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    // Build multipart body
+    ULONG BodyLength = 0;
+    PCHAR Body = KhttpBuildMultipartBody(
+        FormFields,
+        FormFieldCount,
+        Files,
+        FileCount,
+        Boundary,
+        &BodyLength
+    );
+
+    if (!Body) {
+        ExFreePoolWithTag(Boundary, KHTTP_MULTIPART_TAG);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    DbgPrint("[KHTTP] Built multipart body: %lu bytes\n", BodyLength);
+
+    // Build headers
+    CHAR ContentTypeHeader[512];
+    NTSTATUS Status = RtlStringCchPrintfA(
+        ContentTypeHeader,
+        sizeof(ContentTypeHeader),
+        "Content-Type: multipart/form-data; boundary=%s\r\n%s%s",
+        Boundary,
+        UseChunked ? "Transfer-Encoding: chunked\r\n" : "",
+        Headers ? Headers : ""
+    );
+
+    if (!NT_SUCCESS(Status)) {
+        ExFreePoolWithTag(Body, KHTTP_MULTIPART_TAG);
+        ExFreePoolWithTag(Boundary, KHTTP_MULTIPART_TAG);
+        return Status;
+    }
+
+    // Parse URL and connect (similar to KhttpRequest)
+    PCHAR Hostname = NULL, Path = NULL;
+    USHORT Port;
+    BOOLEAN IsHttps;
+    PKTLS_SESSION Session = NULL;
+
+    Status = KhttpParseUrl(Url, &Hostname, &Port, &Path, &IsHttps);
+    if (!NT_SUCCESS(Status)) {
+        goto Cleanup;
+    }
+
+    if (Config && Config->UseHttps) IsHttps = TRUE;
+
+    // Resolve hostname
+    ULONG HostIp;
+    Status = KdnsResolveWithCache(
+        Hostname,
+        Config ? Config->DnsServerIp : DEFAULT_DNS_SERVER,
+        Config ? Config->TimeoutMs : DEFAULT_TIMEOUT,
+        &HostIp
+    );
+
+    if (!NT_SUCCESS(Status)) {
+        goto Cleanup;
+    }
+
+    // Connect
+    ULONG Protocol = IsHttps ? KTLS_PROTO_TCP : KTLS_PROTO_TCP_PLAIN;
+    Status = KtlsConnect(HostIp, Port, Protocol, Hostname, &Session);
+    if (!NT_SUCCESS(Status)) {
+        goto Cleanup;
+    }
+
+    if (Config) {
+        KtlsSetTimeout(Session, Config->TimeoutMs);
+    }
+
+    // Build and send request headers (without body yet for chunked)
+    ULONG RequestLen;
+    PCHAR RequestHeaders = KhttpBuildRequest(
+        Method,
+        Hostname,
+        Path,
+        ContentTypeHeader,
+        UseChunked ? NULL : Body,  // No body in headers if chunked
+        &RequestLen
+    );
+
+    if (!RequestHeaders) {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto Cleanup;
+    }
+
+    // Send headers
+    ULONG BytesSent;
+    Status = KtlsSend(Session, RequestHeaders, RequestLen, &BytesSent);
+    ExFreePoolWithTag(RequestHeaders, KHTTP_TAG);
+
+    if (!NT_SUCCESS(Status)) {
+        goto Cleanup;
+    }
+
+    // Send body (chunked or regular)
+    if (UseChunked) {
+        Status = KhttpSendChunked(
+            Session,
+            Body,
+            BodyLength,
+            ChunkSize,
+            Config ? Config->ProgressCallback : NULL,
+            Config ? Config->CallbackContext : NULL
+        );
+    }
+    else {
+        Status = KtlsSend(Session, Body, BodyLength, &BytesSent);
+    }
+
+    if (!NT_SUCCESS(Status)) {
+        DbgPrint("[KHTTP] Failed to send body: 0x%08X\n", Status);
+        goto Cleanup;
+    }
+
+    // Receive response (same as regular request)
+    ULONG MaxResp = Config ? Config->MaxResponseSize : DEFAULT_MAX_RESPONSE;
+    PVOID ResponseBuffer = ExAllocatePoolWithTag(NonPagedPool, MaxResp, KHTTP_TAG);
+    if (!ResponseBuffer) {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto Cleanup;
+    }
+
+    ULONG TotalReceived = 0;
+    do {
+        ULONG BytesRecv;
+        Status = KtlsRecv(Session, (PCHAR)ResponseBuffer + TotalReceived,
+            MaxResp - TotalReceived - 1, &BytesRecv);
+
+        if (Status == STATUS_SUCCESS) {
+            TotalReceived += BytesRecv;
+        }
+    } while (Status == STATUS_SUCCESS && TotalReceived < MaxResp - 1);
+
+    if (TotalReceived > 0) {
+        ((PCHAR)ResponseBuffer)[TotalReceived] = '\0';
+        Status = KhttpParseResponse((PCHAR)ResponseBuffer, TotalReceived, Response);
+    }
+    else {
+        Status = STATUS_NO_DATA_DETECTED;
+    }
+
+    ExFreePoolWithTag(ResponseBuffer, KHTTP_TAG);
+
+Cleanup:
+    if (Session) KtlsClose(Session);
+    if (Hostname) ExFreePoolWithTag(Hostname, KHTTP_TAG);
+    if (Path) ExFreePoolWithTag(Path, KHTTP_TAG);
+    if (Body) ExFreePoolWithTag(Body, KHTTP_MULTIPART_TAG);
+    if (Boundary) ExFreePoolWithTag(Boundary, KHTTP_MULTIPART_TAG);
+
+    return Status;
+}
+
+// Public chunked multipart POST
+NTSTATUS KhttpPostMultipartChunked(
+    _In_ PCHAR Url,
+    _In_opt_ PCHAR Headers,
+    _In_opt_ PKHTTP_FORM_FIELD FormFields,
+    _In_ ULONG FormFieldCount,
+    _In_opt_ PKHTTP_FILE Files,
+    _In_ ULONG FileCount,
+    _In_opt_ PKHTTP_CONFIG Config,
+    _Out_ PKHTTP_RESPONSE* Response
+)
+{
+    return KhttpMultipartRequestChunked(
+        KHTTP_POST,
+        Url,
+        Headers,
+        FormFields,
+        FormFieldCount,
+        Files,
+        FileCount,
+        Config,
+        Response
+    );
+}
+
+// Public chunked multipart PUT
+NTSTATUS KhttpPutMultipartChunked(
+    _In_ PCHAR Url,
+    _In_opt_ PCHAR Headers,
+    _In_opt_ PKHTTP_FORM_FIELD FormFields,
+    _In_ ULONG FormFieldCount,
+    _In_opt_ PKHTTP_FILE Files,
+    _In_ ULONG FileCount,
+    _In_opt_ PKHTTP_CONFIG Config,
+    _Out_ PKHTTP_RESPONSE* Response
+)
+{
+    return KhttpMultipartRequestChunked(
+        KHTTP_PUT,
+        Url,
+        Headers,
+        FormFields,
+        FormFieldCount,
+        Files,
+        FileCount,
+        Config,
+        Response
+    );
 }
