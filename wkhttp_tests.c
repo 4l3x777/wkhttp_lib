@@ -404,12 +404,12 @@ VOID TestMultipleFilesUpload(VOID)
     if (!File1Data) return;
     RtlFillMemory(File1Data, 512, 0x11);
 
-    PVOID File2Data = ExAllocatePoolWithTag(NonPagedPool, 5 * 1024 * 1024, 'tseT');
+    PVOID File2Data = ExAllocatePoolWithTag(NonPagedPool, 1024, 'tseT');
     if (!File2Data) {
         ExFreePoolWithTag(File1Data, 'tseT');
         return;
     }
-    RtlFillMemory(File2Data, 5 * 1024 * 1024, 0x22);
+    RtlFillMemory(File2Data, 1024, 0x22);
 
     KHTTP_FILE Files[2] = {
         {
@@ -424,7 +424,7 @@ VOID TestMultipleFilesUpload(VOID)
             .FileName = "document2.bin",
             .ContentType = "application/octet-stream",
             .Data = File2Data,
-            .DataLength = 5 * 1024 * 1024
+            .DataLength = 1024
         }
     };
 
@@ -462,6 +462,67 @@ VOID TestMultipleFilesUpload(VOID)
     ExFreePoolWithTag(File2Data, 'tseT');
 }
 
+// Test: Large file upload with chunked transfer
+VOID TestLargeFileUploadChunked(VOID)
+{
+    // 5MB file
+    ULONG FileSize = 5 * 1024 * 1024;
+
+    PVOID FileData = ExAllocatePoolWithTag(NonPagedPool, FileSize, 'tseT');
+    if (!FileData) {
+        DbgPrint("[Test] Failed to allocate %lu bytes\n", FileSize);
+        return;
+    }
+
+    // Fill with pattern for verification
+    for (ULONG i = 0; i < FileSize / 4; i++) {
+        ((ULONG*)FileData)[i] = i;
+    }
+
+    KHTTP_FILE File = {
+        .FieldName = "largefile",
+        .FileName = "large5mb.bin",
+        .ContentType = "application/octet-stream",
+        .Data = FileData,
+        .DataLength = FileSize
+    };
+
+    // Config with chunked transfer enabled
+    KHTTP_CONFIG Config = {
+        .UseHttps = TRUE,
+        .TimeoutMs = 120000,  // 2 minutes
+        .MaxResponseSize = 5 * 1024 * 1024,
+        .DnsServerIp = 0,
+        .UserAgent = "KernelHTTP/1.0",
+        .UseChunkedTransfer = TRUE,  // Enable chunked
+        .ChunkSize = 64 * 1024,      // 64KB chunks
+        .ProgressCallback = NULL,
+        .CallbackContext = NULL
+    };
+
+    PKHTTP_RESPONSE Response = NULL;
+    NTSTATUS Status = KhttpPostMultipartChunked(
+        "https://httpbin.org/post",
+        NULL,
+        NULL,
+        0,
+        &File,
+        1,
+        &Config,
+        &Response
+    );
+
+    if (NT_SUCCESS(Status) && Response) {
+        DbgPrint("[KHTTP] Large file uploaded: %lu (size: %lu bytes)\n",
+            Response->StatusCode, FileSize);
+        KhttpFreeResponse(Response);
+    }
+    else {
+        DbgPrint("[KHTTP] Large file upload failed: 0x%08X\n", Status);
+    }
+
+    ExFreePoolWithTag(FileData, 'tseT');
+}
 
 // =============================================================
 // DRIVER ENTRY
@@ -502,6 +563,9 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath) 
     // Delay between tests
     KhttpSleep(2000); // 2 seconds
     TestMultipleFilesUpload();
+    // Delay between tests
+    KhttpSleep(2000); // 2 seconds
+    TestLargeFileUploadChunked();
 
     DbgPrint("\n[Driver] Tests complete\n");
 

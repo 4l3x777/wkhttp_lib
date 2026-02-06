@@ -1116,3 +1116,367 @@ NTSTATUS KhttpDecodeChunked(
 
     return STATUS_SUCCESS;
 }
+
+// Helper to send data (handles both TLS and plain TCP)
+static NTSTATUS KhttpSendData(
+    _In_ PKTLS_SESSION Session,
+    _In_ PVOID Data,
+    _In_ ULONG Length,
+    _Out_opt_ PULONG BytesSent
+)
+{
+    ULONG Sent = 0;
+    NTSTATUS Status = KtlsSend(Session, Data, Length, &Sent);
+
+    if (BytesSent) {
+        *BytesSent = Sent;
+    }
+
+    return Status;
+}
+
+// Send data in chunks with Transfer-Encoding: chunked
+static NTSTATUS KhttpSendChunked(
+    _In_ PKTLS_SESSION Session,
+    _In_ PVOID Data,
+    _In_ ULONG TotalLength,
+    _In_ ULONG ChunkSize,
+    _In_opt_ PKHTTP_PROGRESS_CALLBACK ProgressCallback,
+    _In_opt_ PVOID CallbackContext
+)
+{
+    NTSTATUS Status = STATUS_SUCCESS;
+    ULONG BytesSent = 0;
+    UCHAR* DataPtr = (UCHAR*)Data;
+
+    if (ChunkSize == 0 || ChunkSize > KHTTP_MAX_CHUNK_SIZE) {
+        ChunkSize = KHTTP_CHUNK_SIZE;
+    }
+
+    DbgPrint("[KHTTP] Starting chunked transfer: %lu bytes (chunk: %lu)\n",
+        TotalLength, ChunkSize);
+
+    while (BytesSent < TotalLength) {
+        ULONG CurrentChunkSize = min(ChunkSize, TotalLength - BytesSent);
+
+        // Build chunk header: "size_in_hex\r\n"
+        CHAR ChunkHeader[32];
+        Status = RtlStringCchPrintfA(
+            ChunkHeader,
+            sizeof(ChunkHeader),
+            "%X\r\n",
+            CurrentChunkSize
+        );
+
+        if (!NT_SUCCESS(Status)) {
+            DbgPrint("[KHTTP] Failed to format chunk header\n");
+            return STATUS_UNSUCCESSFUL;
+        }
+
+        // Send chunk header
+        Status = KhttpSendData(Session, ChunkHeader, (ULONG)strlen(ChunkHeader), NULL);
+        if (!NT_SUCCESS(Status)) {
+            DbgPrint("[KHTTP] Failed to send chunk header: 0x%08X\n", Status);
+            return Status;
+        }
+
+        // Send chunk data
+        Status = KhttpSendData(Session, DataPtr + BytesSent, CurrentChunkSize, NULL);
+        if (!NT_SUCCESS(Status)) {
+            DbgPrint("[KHTTP] Failed to send chunk data: 0x%08X\n", Status);
+            return Status;
+        }
+
+        // Send chunk trailer: "\r\n"
+        CHAR ChunkTrailer[] = "\r\n";
+        Status = KhttpSendData(Session, ChunkTrailer, 2, NULL);
+        if (!NT_SUCCESS(Status)) {
+            DbgPrint("[KHTTP] Failed to send chunk trailer: 0x%08X\n", Status);
+            return Status;
+        }
+
+        BytesSent += CurrentChunkSize;
+
+        // Progress callback
+        if (ProgressCallback) {
+            ProgressCallback(BytesSent, TotalLength, CallbackContext);
+        }
+
+        if (BytesSent % (ChunkSize * 10) == 0 || BytesSent >= TotalLength) {
+            ULONG Percent = (BytesSent * 100) / TotalLength;
+            DbgPrint("[KHTTP] Sent: %lu/%lu bytes (%lu%%)\n",
+                BytesSent, TotalLength, Percent);
+        }
+    }
+
+    // Send final chunk: "0\r\n\r\n"
+    CHAR FinalChunk[] = "0\r\n\r\n";
+    Status = KhttpSendData(Session, FinalChunk, 5, NULL);
+    if (!NT_SUCCESS(Status)) {
+        DbgPrint("[KHTTP] Failed to send final chunk: 0x%08X\n", Status);
+        return Status;
+    }
+
+    DbgPrint("[KHTTP] Chunked transfer complete: %lu bytes\n", TotalLength);
+    return STATUS_SUCCESS;
+}
+
+// Multipart request with chunked transfer support
+static NTSTATUS KhttpMultipartRequestChunked(
+    _In_ KHTTP_METHOD Method,
+    _In_ PCHAR Url,
+    _In_opt_ PCHAR Headers,
+    _In_opt_ PKHTTP_FORM_FIELD FormFields,
+    _In_ ULONG FormFieldCount,
+    _In_opt_ PKHTTP_FILE Files,
+    _In_ ULONG FileCount,
+    _In_opt_ PKHTTP_CONFIG Config,
+    _Out_ PKHTTP_RESPONSE* Response
+)
+{
+    if (!Url || !Response) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    *Response = NULL;
+
+    // Check if we should use chunked transfer
+    BOOLEAN UseChunked = FALSE;
+    ULONG ChunkSize = KHTTP_CHUNK_SIZE;
+
+    if (Config) {
+        UseChunked = Config->UseChunkedTransfer;
+        if (Config->ChunkSize > 0 && Config->ChunkSize <= KHTTP_MAX_CHUNK_SIZE) {
+            ChunkSize = Config->ChunkSize;
+        }
+    }
+
+    // Calculate total body size to decide on chunked transfer
+    ULONG TotalFileSize = 0;
+    for (ULONG i = 0; i < FileCount; i++) {
+        if (Files[i].Data && Files[i].DataLength > 0) {
+            TotalFileSize += Files[i].DataLength;
+        }
+    }
+
+    // Auto-enable chunked for large bodies (>2MB)
+    if (TotalFileSize > KHTTP_MAX_MEMORY_BODY_SIZE) {
+        UseChunked = TRUE;
+        DbgPrint("[KHTTP] Large body detected (%lu bytes), enabling chunked transfer\n",
+            TotalFileSize);
+    }
+
+    DbgPrint("[KHTTP] Starting multipart request to %s (chunked: %d)\n",
+        Url, UseChunked);
+
+    // Generate boundary
+    PCHAR Boundary = KhttpGenerateBoundary();
+    if (!Boundary) {
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    // Build multipart body
+    ULONG BodyLength = 0;
+    PCHAR Body = KhttpBuildMultipartBody(
+        FormFields,
+        FormFieldCount,
+        Files,
+        FileCount,
+        Boundary,
+        &BodyLength
+    );
+
+    if (!Body) {
+        ExFreePoolWithTag(Boundary, KHTTP_MULTIPART_TAG);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    DbgPrint("[KHTTP] Built multipart body: %lu bytes\n", BodyLength);
+
+    // Build headers
+    CHAR ContentTypeHeader[512];
+    NTSTATUS Status = RtlStringCchPrintfA(
+        ContentTypeHeader,
+        sizeof(ContentTypeHeader),
+        "Content-Type: multipart/form-data; boundary=%s\r\n%s%s",
+        Boundary,
+        UseChunked ? "Transfer-Encoding: chunked\r\n" : "",
+        Headers ? Headers : ""
+    );
+
+    if (!NT_SUCCESS(Status)) {
+        ExFreePoolWithTag(Body, KHTTP_MULTIPART_TAG);
+        ExFreePoolWithTag(Boundary, KHTTP_MULTIPART_TAG);
+        return Status;
+    }
+
+    // Parse URL and connect (similar to KhttpRequest)
+    PCHAR Hostname = NULL, Path = NULL;
+    USHORT Port;
+    BOOLEAN IsHttps;
+    PKTLS_SESSION Session = NULL;
+
+    Status = KhttpParseUrl(Url, &Hostname, &Port, &Path, &IsHttps);
+    if (!NT_SUCCESS(Status)) {
+        goto Cleanup;
+    }
+
+    if (Config && Config->UseHttps) IsHttps = TRUE;
+
+    // Resolve hostname
+    ULONG HostIp;
+    Status = KdnsResolveWithCache(
+        Hostname,
+        Config ? Config->DnsServerIp : DEFAULT_DNS_SERVER,
+        Config ? Config->TimeoutMs : DEFAULT_TIMEOUT,
+        &HostIp
+    );
+
+    if (!NT_SUCCESS(Status)) {
+        goto Cleanup;
+    }
+
+    // Connect
+    ULONG Protocol = IsHttps ? KTLS_PROTO_TCP : KTLS_PROTO_TCP_PLAIN;
+    Status = KtlsConnect(HostIp, Port, Protocol, Hostname, &Session);
+    if (!NT_SUCCESS(Status)) {
+        goto Cleanup;
+    }
+
+    if (Config) {
+        KtlsSetTimeout(Session, Config->TimeoutMs);
+    }
+
+    // Build and send request headers (without body yet for chunked)
+    ULONG RequestLen;
+    PCHAR RequestHeaders = KhttpBuildRequest(
+        Method,
+        Hostname,
+        Path,
+        ContentTypeHeader,
+        UseChunked ? NULL : Body,  // No body in headers if chunked
+        &RequestLen
+    );
+
+    if (!RequestHeaders) {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto Cleanup;
+    }
+
+    // Send headers
+    ULONG BytesSent;
+    Status = KtlsSend(Session, RequestHeaders, RequestLen, &BytesSent);
+    ExFreePoolWithTag(RequestHeaders, KHTTP_TAG);
+
+    if (!NT_SUCCESS(Status)) {
+        goto Cleanup;
+    }
+
+    // Send body (chunked or regular)
+    if (UseChunked) {
+        Status = KhttpSendChunked(
+            Session,
+            Body,
+            BodyLength,
+            ChunkSize,
+            Config ? Config->ProgressCallback : NULL,
+            Config ? Config->CallbackContext : NULL
+        );
+    }
+    else {
+        Status = KtlsSend(Session, Body, BodyLength, &BytesSent);
+    }
+
+    if (!NT_SUCCESS(Status)) {
+        DbgPrint("[KHTTP] Failed to send body: 0x%08X\n", Status);
+        goto Cleanup;
+    }
+
+    // Receive response (same as regular request)
+    ULONG MaxResp = Config ? Config->MaxResponseSize : DEFAULT_MAX_RESPONSE;
+    PVOID ResponseBuffer = ExAllocatePoolWithTag(NonPagedPool, MaxResp, KHTTP_TAG);
+    if (!ResponseBuffer) {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto Cleanup;
+    }
+
+    ULONG TotalReceived = 0;
+    do {
+        ULONG BytesRecv;
+        Status = KtlsRecv(Session, (PCHAR)ResponseBuffer + TotalReceived,
+            MaxResp - TotalReceived - 1, &BytesRecv);
+
+        if (Status == STATUS_SUCCESS) {
+            TotalReceived += BytesRecv;
+        }
+    } while (Status == STATUS_SUCCESS && TotalReceived < MaxResp - 1);
+
+    if (TotalReceived > 0) {
+        ((PCHAR)ResponseBuffer)[TotalReceived] = '\0';
+        Status = KhttpParseResponse((PCHAR)ResponseBuffer, TotalReceived, Response);
+    }
+    else {
+        Status = STATUS_NO_DATA_DETECTED;
+    }
+
+    ExFreePoolWithTag(ResponseBuffer, KHTTP_TAG);
+
+Cleanup:
+    if (Session) KtlsClose(Session);
+    if (Hostname) ExFreePoolWithTag(Hostname, KHTTP_TAG);
+    if (Path) ExFreePoolWithTag(Path, KHTTP_TAG);
+    if (Body) ExFreePoolWithTag(Body, KHTTP_MULTIPART_TAG);
+    if (Boundary) ExFreePoolWithTag(Boundary, KHTTP_MULTIPART_TAG);
+
+    return Status;
+}
+
+// Public chunked multipart POST
+NTSTATUS KhttpPostMultipartChunked(
+    _In_ PCHAR Url,
+    _In_opt_ PCHAR Headers,
+    _In_opt_ PKHTTP_FORM_FIELD FormFields,
+    _In_ ULONG FormFieldCount,
+    _In_opt_ PKHTTP_FILE Files,
+    _In_ ULONG FileCount,
+    _In_opt_ PKHTTP_CONFIG Config,
+    _Out_ PKHTTP_RESPONSE* Response
+)
+{
+    return KhttpMultipartRequestChunked(
+        KHTTP_POST,
+        Url,
+        Headers,
+        FormFields,
+        FormFieldCount,
+        Files,
+        FileCount,
+        Config,
+        Response
+    );
+}
+
+// Public chunked multipart PUT
+NTSTATUS KhttpPutMultipartChunked(
+    _In_ PCHAR Url,
+    _In_opt_ PCHAR Headers,
+    _In_opt_ PKHTTP_FORM_FIELD FormFields,
+    _In_ ULONG FormFieldCount,
+    _In_opt_ PKHTTP_FILE Files,
+    _In_ ULONG FileCount,
+    _In_opt_ PKHTTP_CONFIG Config,
+    _Out_ PKHTTP_RESPONSE* Response
+)
+{
+    return KhttpMultipartRequestChunked(
+        KHTTP_PUT,
+        Url,
+        Headers,
+        FormFields,
+        FormFieldCount,
+        Files,
+        FileCount,
+        Config,
+        Response
+    );
+}

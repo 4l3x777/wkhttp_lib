@@ -2,6 +2,11 @@
 #include <ntddk.h>
 #include <ntstrsafe.h>
 
+// Size limits and chunked transfer support
+#define KHTTP_MAX_MEMORY_BODY_SIZE (2 * 1024 * 1024)    // 2MB for in-memory
+#define KHTTP_CHUNK_SIZE (64 * 1024)                    // 64KB default chunk
+#define KHTTP_MAX_CHUNK_SIZE (256 * 1024)               // 256KB max chunk
+
 // HTTP Methods
 typedef enum _KHTTP_METHOD {
     KHTTP_GET,
@@ -33,13 +38,15 @@ typedef VOID(*PKHTTP_PROGRESS_CALLBACK)(
 
 // HTTP Request Configuration
 typedef struct _KHTTP_CONFIG {
-    BOOLEAN UseHttps;                      // TRUE for HTTPS, FALSE for HTTP
-    ULONG TimeoutMs;                       // Timeout in milliseconds
-    PCHAR UserAgent;                       // Custom User-Agent header
-    ULONG MaxResponseSize;                 // Maximum response buffer size
-    ULONG DnsServerIp;                     // DNS server IP (0 for default 8.8.8.8)
+    BOOLEAN UseHttps;                           // TRUE for HTTPS, FALSE for HTTP
+    ULONG TimeoutMs;                            // Timeout in milliseconds
+    PCHAR UserAgent;                            // Custom User-Agent header
+    ULONG MaxResponseSize;                      // Maximum response buffer size
+    ULONG DnsServerIp;                          // DNS server IP (0 for default 8.8.8.8)
     PKHTTP_PROGRESS_CALLBACK ProgressCallback;  // Upload progress callback
-    PVOID CallbackContext;                 // Context for progress callback
+    PVOID CallbackContext;                      // Context for progress callback
+    BOOLEAN UseChunkedTransfer;                 // Enable chunked encoding
+    ULONG ChunkSize;                            // Chunk size (0 = default 64KB)
 } KHTTP_CONFIG, * PKHTTP_CONFIG;
 
 // File upload structure for multipart/form-data
@@ -189,4 +196,27 @@ NTSTATUS KhttpDecodeChunked(
     _In_ ULONG ChunkedLength,
     _Out_ PCHAR* DecodedData,
     _Out_ PULONG DecodedLength
+);
+
+// --- Chunked multipart upload functions ---
+NTSTATUS KhttpPostMultipartChunked(
+    _In_ PCHAR Url,
+    _In_opt_ PCHAR Headers,
+    _In_opt_ PKHTTP_FORM_FIELD FormFields,
+    _In_ ULONG FormFieldCount,
+    _In_opt_ PKHTTP_FILE Files,
+    _In_ ULONG FileCount,
+    _In_opt_ PKHTTP_CONFIG Config,
+    _Out_ PKHTTP_RESPONSE* Response
+);
+
+NTSTATUS KhttpPutMultipartChunked(
+    _In_ PCHAR Url,
+    _In_opt_ PCHAR Headers,
+    _In_opt_ PKHTTP_FORM_FIELD FormFields,
+    _In_ ULONG FormFieldCount,
+    _In_opt_ PKHTTP_FILE Files,
+    _In_ ULONG FileCount,
+    _In_opt_ PKHTTP_CONFIG Config,
+    _Out_ PKHTTP_RESPONSE* Response
 );
