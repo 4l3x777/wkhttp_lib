@@ -1358,7 +1358,54 @@ static NTSTATUS KhttpSendChunked(
     return STATUS_SUCCESS;
 }
 
-// Send multipart with file streaming support
+// Send a single chunk without final terminator (for multipart streaming)
+static NTSTATUS KhttpSendChunkedPart(
+    _In_ PKTLS_SESSION Session,
+    _In_ PVOID Data,
+    _In_ ULONG Length
+)
+{
+    if (Length == 0) return STATUS_SUCCESS;
+
+    // Build chunk header: "size_in_hex\r\n"
+    CHAR ChunkHeader[32];
+    NTSTATUS Status = RtlStringCchPrintfA(
+        ChunkHeader,
+        sizeof(ChunkHeader),
+        "%X\r\n",
+        Length
+    );
+
+    if (!NT_SUCCESS(Status)) {
+        DbgPrint("[KHTTP] Failed to format chunk header\n");
+        return STATUS_UNSUCCESSFUL;
+    }
+
+    // Send chunk header
+    Status = KhttpSendData(Session, ChunkHeader, (ULONG)strlen(ChunkHeader), NULL);
+    if (!NT_SUCCESS(Status)) {
+        DbgPrint("[KHTTP] Failed to send chunk header: 0x%08X\n", Status);
+        return Status;
+    }
+
+    // Send chunk data
+    Status = KhttpSendData(Session, Data, Length, NULL);
+    if (!NT_SUCCESS(Status)) {
+        DbgPrint("[KHTTP] Failed to send chunk data: 0x%08X\n", Status);
+        return Status;
+    }
+
+    // Send chunk trailer: "\r\n"
+    CHAR ChunkTrailer[] = "\r\n";
+    Status = KhttpSendData(Session, ChunkTrailer, 2, NULL);
+    if (!NT_SUCCESS(Status)) {
+        DbgPrint("[KHTTP] Failed to send chunk trailer: 0x%08X\n", Status);
+        return Status;
+    }
+
+    return STATUS_SUCCESS;
+}
+
 // Send multipart with file streaming support
 static NTSTATUS KhttpSendMultipartWithFiles(
     _In_ PKTLS_SESSION Session,
@@ -1399,7 +1446,6 @@ static NTSTATUS KhttpSendMultipartWithFiles(
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    // Zero buffer for safety
     RtlZeroMemory(ChunkBuffer, ChunkSize);
 
     // 1. Send form fields
@@ -1416,8 +1462,8 @@ static NTSTATUS KhttpSendMultipartWithFiles(
             goto Cleanup;
         }
 
-        Status = KhttpSendChunked(Session, PartHeader, (ULONG)strlen(PartHeader),
-            ChunkSize, NULL, NULL);
+        // Send as single chunk part (NO final chunk)
+        Status = KhttpSendChunkedPart(Session, PartHeader, (ULONG)strlen(PartHeader));
         if (!NT_SUCCESS(Status)) {
             goto Cleanup;
         }
@@ -1442,8 +1488,7 @@ static NTSTATUS KhttpSendMultipartWithFiles(
             goto Cleanup;
         }
 
-        Status = KhttpSendChunked(Session, FilePartHeader, (ULONG)strlen(FilePartHeader),
-            ChunkSize, NULL, NULL);
+        Status = KhttpSendChunkedPart(Session, FilePartHeader, (ULONG)strlen(FilePartHeader));
         if (!NT_SUCCESS(Status)) {
             goto Cleanup;
         }
@@ -1474,17 +1519,11 @@ static NTSTATUS KhttpSendMultipartWithFiles(
                 if (!NT_SUCCESS(Status) || BytesRead == 0) {
                     DbgPrint("[KHTTP] File read failed: 0x%08X\n", Status);
                     KhttpCloseFileReader(&Reader);
-
-                    // Send final chunk to properly close transfer
-                    CHAR FinalChunk[] = "0\r\n\r\n";
-                    KhttpSendData(Session, FinalChunk, 5, NULL);
-
                     goto Cleanup;
                 }
 
-                // Send chunk
-                Status = KhttpSendChunked(Session, ChunkBuffer, BytesRead,
-                    ChunkSize, NULL, NULL);
+                // Send as chunk part (NO final chunk)
+                Status = KhttpSendChunkedPart(Session, ChunkBuffer, BytesRead);
                 if (!NT_SUCCESS(Status)) {
                     KhttpCloseFileReader(&Reader);
                     goto Cleanup;
@@ -1509,8 +1548,7 @@ static NTSTATUS KhttpSendMultipartWithFiles(
         }
         else if (Files[i].Data) {
             // REGULAR MODE FROM MEMORY
-            Status = KhttpSendChunked(Session, Files[i].Data, Files[i].DataLength,
-                ChunkSize, NULL, NULL);
+            Status = KhttpSendChunkedPart(Session, Files[i].Data, Files[i].DataLength);
             if (!NT_SUCCESS(Status)) {
                 goto Cleanup;
             }
@@ -1519,7 +1557,7 @@ static NTSTATUS KhttpSendMultipartWithFiles(
 
         // End file part
         CHAR PartTrailer[] = "\r\n";
-        Status = KhttpSendChunked(Session, PartTrailer, 2, ChunkSize, NULL, NULL);
+        Status = KhttpSendChunkedPart(Session, PartTrailer, 2);
         if (!NT_SUCCESS(Status)) {
             goto Cleanup;
         }
@@ -1533,16 +1571,24 @@ static NTSTATUS KhttpSendMultipartWithFiles(
         goto Cleanup;
     }
 
-    Status = KhttpSendChunked(Session, FinalBoundary, (ULONG)strlen(FinalBoundary),
-        ChunkSize, NULL, NULL);
-
-    if (NT_SUCCESS(Status)) {
-        DbgPrint("[KHTTP] Multipart send complete: %lu bytes\n", TotalSent);
+    Status = KhttpSendChunkedPart(Session, FinalBoundary, (ULONG)strlen(FinalBoundary));
+    if (!NT_SUCCESS(Status)) {
+        goto Cleanup;
     }
+
+    // 4. Send final chunk terminator (ONLY ONCE!)
+    CHAR FinalChunk[] = "0\r\n\r\n";
+    Status = KhttpSendData(Session, FinalChunk, 5, NULL);
+    if (!NT_SUCCESS(Status)) {
+        DbgPrint("[KHTTP] Failed to send final chunk: 0x%08X\n", Status);
+        goto Cleanup;
+    }
+
+    DbgPrint("[KHTTP] Multipart send complete: %lu bytes\n", TotalSent);
 
 Cleanup:
     if (ChunkBuffer) {
-        RtlFillMemory(ChunkBuffer, ChunkSize, 0xDD);  // Debug pattern
+        RtlFillMemory(ChunkBuffer, ChunkSize, 0xDD);
         ExFreePoolWithTag(ChunkBuffer, KHTTP_TAG);
     }
 
