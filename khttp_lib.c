@@ -585,6 +585,127 @@ VOID KhttpFreeResponse(_In_ PKHTTP_RESPONSE Response) {
     ExFreePoolWithTag(Response, KHTTP_TAG);
 }
 
+// --- File streaming support ---
+
+// File reader context
+typedef struct _KHTTP_FILE_READER {
+    HANDLE FileHandle;
+    LARGE_INTEGER FileSize;
+    IO_STATUS_BLOCK IoStatus;
+} KHTTP_FILE_READER, * PKHTTP_FILE_READER;
+
+// Open file for reading and get size
+static NTSTATUS KhttpOpenFileForReading(
+    _In_ PUNICODE_STRING FilePath,
+    _Out_ PKHTTP_FILE_READER Reader
+)
+{
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL) {
+        DbgPrint("[KHTTP] ERROR: File operations require PASSIVE_LEVEL (current: %d)\n",
+            KeGetCurrentIrql());
+        return STATUS_INVALID_DEVICE_STATE;
+    }
+
+    if (!FilePath || !Reader) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    RtlZeroMemory(Reader, sizeof(KHTTP_FILE_READER));
+
+    OBJECT_ATTRIBUTES ObjAttr;
+    InitializeObjectAttributes(
+        &ObjAttr,
+        FilePath,
+        OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
+        NULL,
+        NULL
+    );
+
+    NTSTATUS Status = ZwCreateFile(
+        &Reader->FileHandle,
+        GENERIC_READ | SYNCHRONIZE,
+        &ObjAttr,
+        &Reader->IoStatus,
+        NULL,
+        FILE_ATTRIBUTE_NORMAL,
+        FILE_SHARE_READ,
+        FILE_OPEN,
+        FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE,
+        NULL,
+        0
+    );
+
+    if (!NT_SUCCESS(Status)) {
+        DbgPrint("[KHTTP] Failed to open file: 0x%08X\n", Status);
+        return Status;
+    }
+
+    // Get file size
+    FILE_STANDARD_INFORMATION FileInfo;
+    Status = ZwQueryInformationFile(
+        Reader->FileHandle,
+        &Reader->IoStatus,
+        &FileInfo,
+        sizeof(FILE_STANDARD_INFORMATION),
+        FileStandardInformation
+    );
+
+    if (!NT_SUCCESS(Status)) {
+        ZwClose(Reader->FileHandle);
+        Reader->FileHandle = NULL;
+        return Status;
+    }
+
+    Reader->FileSize = FileInfo.EndOfFile;
+    DbgPrint("[KHTTP] Opened file: %llu bytes\n", Reader->FileSize.QuadPart);
+
+    return STATUS_SUCCESS;
+}
+
+// Close file reader
+static VOID KhttpCloseFileReader(_In_ PKHTTP_FILE_READER Reader)
+{
+    if (Reader && Reader->FileHandle) {
+        ZwClose(Reader->FileHandle);
+        Reader->FileHandle = NULL;
+    }
+}
+
+// Read chunk from file
+static NTSTATUS KhttpReadFileChunk(
+    _In_ PKHTTP_FILE_READER Reader,
+    _In_ LARGE_INTEGER Offset,
+    _Out_ PVOID Buffer,
+    _In_ ULONG BufferSize,
+    _Out_ PULONG BytesRead
+)
+{
+    if (!Reader || !Buffer || !BytesRead) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    NTSTATUS Status = ZwReadFile(
+        Reader->FileHandle,
+        NULL,
+        NULL,
+        NULL,
+        &Reader->IoStatus,
+        Buffer,
+        BufferSize,
+        &Offset,
+        NULL
+    );
+
+    if (NT_SUCCESS(Status)) {
+        *BytesRead = (ULONG)Reader->IoStatus.Information;
+    }
+    else {
+        *BytesRead = 0;
+    }
+
+    return Status;
+}
+
 // --- Multipart operations ---
 
 // Simple hash function for entropy mixing
@@ -696,7 +817,12 @@ PCHAR KhttpBuildMultipartBody(
 
     // Size for files
     for (i = 0; i < FileCount; i++) {
-        if (!Files[i].FieldName || !Files[i].FileName || !Files[i].Data) {
+        if (!Files[i].FieldName || !Files[i].FileName) {
+            continue;
+        }
+
+        // For stream files, Data can be NULL
+        if (!Files[i].UseFileStream && !Files[i].Data) {
             continue;
         }
 
@@ -712,9 +838,17 @@ PCHAR KhttpBuildMultipartBody(
         TotalSize += 50 + (ULONG)FieldNameLen + (ULONG)FileNameLen;
         // "Content-Type: \r\n\r\n"
         TotalSize += 16 + (ULONG)ContentTypeLen;
+
         // File data + "\r\n"
-        TotalSize += Files[i].DataLength + 2;
+        if (!Files[i].UseFileStream) {
+            TotalSize += Files[i].DataLength + 2;
+        }
+        else {
+            // For stream files, only "\r\n" (data sent separately)
+            TotalSize += 2;
+        }
     }
+
 
     // Final boundary: "--" + boundary + "--\r\n"
     TotalSize += 2 + (ULONG)BoundaryLen + 4;
@@ -781,7 +915,7 @@ PCHAR KhttpBuildMultipartBody(
 
     // Add files
     for (i = 0; i < FileCount; i++) {
-        if (!Files[i].FieldName || !Files[i].FileName || !Files[i].Data) {
+        if (!Files[i].FieldName || !Files[i].FileName) {
             continue;
         }
 
@@ -815,21 +949,24 @@ PCHAR KhttpBuildMultipartBody(
         Current += Written;
         Remaining -= (ULONG)Written;
 
-        // Copy file data
-        if (Files[i].DataLength > Remaining - 2) {
-            DbgPrint("[KHTTP] Insufficient buffer for file data\n");
-            ExFreePoolWithTag(Body, KHTTP_MULTIPART_TAG);
-            return NULL;
+        // Copy file data (only for memory-based files)
+        if (!Files[i].UseFileStream && Files[i].Data && Files[i].DataLength > 0) {
+            if (Files[i].DataLength > Remaining - 2) {
+                DbgPrint("[KHTTP] Insufficient buffer for file data\n");
+                ExFreePoolWithTag(Body, KHTTP_MULTIPART_TAG);
+                return NULL;
+            }
+
+            RtlCopyMemory(Current, Files[i].Data, Files[i].DataLength);
+            Current += Files[i].DataLength;
+            Remaining -= Files[i].DataLength;
+
+            // Add CRLF after data
+            *Current++ = '\r';
+            *Current++ = '\n';
+            Remaining -= 2;
         }
-
-        RtlCopyMemory(Current, Files[i].Data, Files[i].DataLength);
-        Current += Files[i].DataLength;
-        Remaining -= Files[i].DataLength;
-
-        // Add CRLF after data
-        *Current++ = '\r';
-        *Current++ = '\n';
-        Remaining -= 2;
+        // For stream files, data will be sent separately via KhttpSendMultipartWithFiles
     }
 
     // Add final boundary
@@ -1221,6 +1358,196 @@ static NTSTATUS KhttpSendChunked(
     return STATUS_SUCCESS;
 }
 
+// Send multipart with file streaming support
+static NTSTATUS KhttpSendMultipartWithFiles(
+    _In_ PKTLS_SESSION Session,
+    _In_ PCHAR Boundary,
+    _In_opt_ PKHTTP_FORM_FIELD FormFields,
+    _In_ ULONG FormFieldCount,
+    _In_opt_ PKHTTP_FILE Files,
+    _In_ ULONG FileCount,
+    _In_ ULONG ChunkSize,
+    _In_opt_ PKHTTP_PROGRESS_CALLBACK ProgressCallback,
+    _In_opt_ PVOID CallbackContext
+)
+{
+    NTSTATUS Status = STATUS_SUCCESS;
+    CHAR PartHeader[1024];
+    ULONG TotalSent = 0;
+    ULONG64 TotalSize = 0;
+
+    // Calculate total size for progress
+    for (ULONG i = 0; i < FileCount; i++) {
+        if (Files[i].UseFileStream && Files[i].FilePath) {
+            KHTTP_FILE_READER Reader;
+            if (NT_SUCCESS(KhttpOpenFileForReading(Files[i].FilePath, &Reader))) {
+                TotalSize += Reader.FileSize.QuadPart;
+                KhttpCloseFileReader(&Reader);
+            }
+        }
+        else if (Files[i].Data) {
+            TotalSize += Files[i].DataLength;
+        }
+    }
+
+    // Allocate chunk buffer
+    PVOID ChunkBuffer = ExAllocatePoolWithTag(NonPagedPool, ChunkSize, KHTTP_TAG);
+    if (!ChunkBuffer) {
+        DbgPrint("[KHTTP] Failed to allocate chunk buffer\n");
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    // Zero buffer for safety
+    RtlZeroMemory(ChunkBuffer, ChunkSize);
+
+    // 1. Send form fields
+    for (ULONG i = 0; i < FormFieldCount; i++) {
+        if (!FormFields[i].Name || !FormFields[i].Value) continue;
+
+        Status = RtlStringCchPrintfA(
+            PartHeader, sizeof(PartHeader),
+            "--%s\r\nContent-Disposition: form-data; name=\"%s\"\r\n\r\n%s\r\n",
+            Boundary, FormFields[i].Name, FormFields[i].Value
+        );
+
+        if (!NT_SUCCESS(Status)) {
+            ExFreePoolWithTag(ChunkBuffer, KHTTP_TAG);
+            return Status;
+        }
+
+        Status = KhttpSendChunked(Session, PartHeader, (ULONG)strlen(PartHeader),
+            ChunkSize, NULL, NULL);
+        if (!NT_SUCCESS(Status)) {
+            ExFreePoolWithTag(ChunkBuffer, KHTTP_TAG);
+            return Status;
+        }
+    }
+
+    // 2. Send files
+    for (ULONG i = 0; i < FileCount; i++) {
+        if (!Files[i].FieldName || !Files[i].FileName) continue;
+
+        PCHAR ContentType = Files[i].ContentType ?
+            Files[i].ContentType : "application/octet-stream";
+
+        // Send file part header
+        CHAR FilePartHeader[1024];
+        Status = RtlStringCchPrintfA(
+            FilePartHeader, sizeof(FilePartHeader),
+            "--%s\r\nContent-Disposition: form-data; name=\"%s\"; filename=\"%s\"\r\nContent-Type: %s\r\n\r\n",
+            Boundary, Files[i].FieldName, Files[i].FileName, ContentType
+        );
+
+        if (!NT_SUCCESS(Status)) {
+            ExFreePoolWithTag(ChunkBuffer, KHTTP_TAG);
+            return Status;
+        }
+
+        Status = KhttpSendChunked(Session, FilePartHeader, (ULONG)strlen(FilePartHeader),
+            ChunkSize, NULL, NULL);
+        if (!NT_SUCCESS(Status)) {
+            ExFreePoolWithTag(ChunkBuffer, KHTTP_TAG);
+            return Status;
+        }
+
+        // Send file data
+        if (Files[i].UseFileStream && Files[i].FilePath) {
+            // STREAM FROM DISK
+            KHTTP_FILE_READER Reader;
+            Status = KhttpOpenFileForReading(Files[i].FilePath, &Reader);
+            if (!NT_SUCCESS(Status)) {
+                DbgPrint("[KHTTP] Failed to open file for streaming: 0x%08X\n", Status);
+                ExFreePoolWithTag(ChunkBuffer, KHTTP_TAG);
+                return Status;
+            }
+
+            LARGE_INTEGER Offset;
+            Offset.QuadPart = 0;
+            ULONG64 Remaining = Reader.FileSize.QuadPart;
+
+            DbgPrint("[KHTTP] Streaming file: %llu bytes\n", Remaining);
+
+            while (Remaining > 0) {
+                ULONG BytesToRead = (ULONG)min(ChunkSize, Remaining);
+                ULONG BytesRead = 0;
+
+                Status = KhttpReadFileChunk(&Reader, Offset, ChunkBuffer,
+                    BytesToRead, &BytesRead);
+
+                if (!NT_SUCCESS(Status) || BytesRead == 0) {
+                    DbgPrint("[KHTTP] File read failed: 0x%08X\n", Status);
+                    KhttpCloseFileReader(&Reader);
+                    ExFreePoolWithTag(ChunkBuffer, KHTTP_TAG);
+
+                    // Send final chunk to properly close transfer
+                    CHAR FinalChunk[] = "0\r\n\r\n";
+                    KhttpSendData(Session, FinalChunk, 5, NULL);
+
+                    return Status == STATUS_SUCCESS ? STATUS_UNEXPECTED_IO_ERROR : Status;
+                }
+
+                // Send chunk
+                Status = KhttpSendChunked(Session, ChunkBuffer, BytesRead,
+                    ChunkSize, NULL, NULL);
+                if (!NT_SUCCESS(Status)) {
+                    KhttpCloseFileReader(&Reader);
+                    ExFreePoolWithTag(ChunkBuffer, KHTTP_TAG);
+                    return Status;
+                }
+
+                Offset.QuadPart += BytesRead;
+                Remaining -= BytesRead;
+                TotalSent += BytesRead;
+
+                // Progress callback
+                if (ProgressCallback && TotalSize > 0) {
+                    ProgressCallback(TotalSent, (ULONG)TotalSize, CallbackContext);
+                }
+
+                if (TotalSent % (ChunkSize * 10) == 0) {
+                    ULONG Percent = TotalSize > 0 ? (ULONG)((TotalSent * 100) / TotalSize) : 0;
+                    DbgPrint("[KHTTP] Progress: %lu%% (%lu bytes)\n", Percent, TotalSent);
+                }
+            }
+
+            KhttpCloseFileReader(&Reader);
+        }
+        else if (Files[i].Data) {
+            // REGULAR MODE FROM MEMORY
+            Status = KhttpSendChunked(Session, Files[i].Data, Files[i].DataLength,
+                ChunkSize, NULL, NULL);
+            if (!NT_SUCCESS(Status)) {
+                ExFreePoolWithTag(ChunkBuffer, KHTTP_TAG);
+                return Status;
+            }
+            TotalSent += Files[i].DataLength;
+        }
+
+        // End file part
+        CHAR PartTrailer[] = "\r\n";
+        Status = KhttpSendChunked(Session, PartTrailer, 2, ChunkSize, NULL, NULL);
+        if (!NT_SUCCESS(Status)) {
+            ExFreePoolWithTag(ChunkBuffer, KHTTP_TAG);
+            return Status;
+        }
+    }
+
+    ExFreePoolWithTag(ChunkBuffer, KHTTP_TAG);
+
+    // 3. Send final boundary
+    CHAR FinalBoundary[256];
+    Status = RtlStringCchPrintfA(FinalBoundary, sizeof(FinalBoundary),
+        "--%s--\r\n", Boundary);
+    if (!NT_SUCCESS(Status)) return Status;
+
+    Status = KhttpSendChunked(Session, FinalBoundary, (ULONG)strlen(FinalBoundary),
+        ChunkSize, NULL, NULL);
+
+    DbgPrint("[KHTTP] Multipart send complete: %lu bytes\n", TotalSent);
+
+    return Status;
+}
+
 // Multipart request with chunked transfer support
 static NTSTATUS KhttpMultipartRequestChunked(
     _In_ KHTTP_METHOD Method,
@@ -1374,14 +1701,40 @@ static NTSTATUS KhttpMultipartRequestChunked(
 
     // Send body (chunked or regular)
     if (UseChunked) {
-        Status = KhttpSendChunked(
-            Session,
-            Body,
-            BodyLength,
-            ChunkSize,
-            Config ? Config->ProgressCallback : NULL,
-            Config ? Config->CallbackContext : NULL
-        );
+        // Check if we have stream files
+        BOOLEAN HasStreamFiles = FALSE;
+        for (ULONG i = 0; i < FileCount; i++) {
+            if (Files && Files[i].UseFileStream) {
+                HasStreamFiles = TRUE;
+                break;
+            }
+        }
+
+        if (HasStreamFiles) {
+            // Use streaming function (from previous implementation)
+            Status = KhttpSendMultipartWithFiles(
+                Session,
+                Boundary,
+                FormFields,
+                FormFieldCount,
+                Files,
+                FileCount,
+                ChunkSize,
+                Config ? Config->ProgressCallback : NULL,
+                Config ? Config->CallbackContext : NULL
+            );
+        }
+        else {
+            // Use original chunked send
+            Status = KhttpSendChunked(
+                Session,
+                Body,
+                BodyLength,
+                ChunkSize,
+                Config ? Config->ProgressCallback : NULL,
+                Config ? Config->CallbackContext : NULL
+            );
+        }
     }
     else {
         Status = KtlsSend(Session, Body, BodyLength, &BytesSent);

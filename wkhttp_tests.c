@@ -307,6 +307,8 @@ VOID TestRestApiHttps(void) {
 // TEST: One file upload
 VOID TestFileUpload(VOID)
 {
+    DbgPrint("\n[UPLOAD KHTTP] Test one file upload\n");
+
     PVOID FileData = ExAllocatePoolWithTag(NonPagedPool, 1024, 'tseT');
     if (!FileData) return;
 
@@ -349,6 +351,8 @@ VOID TestFileUpload(VOID)
 // TEST: Upload file with form
 VOID TestFileUploadWithForm(VOID)
 {
+    DbgPrint("\n[UPLOAD KHTTP] Test one file with form upload\n");
+
     PVOID FileData = ExAllocatePoolWithTag(NonPagedPool, 2048, 'tseT');
     if (!FileData) return;
 
@@ -400,6 +404,8 @@ VOID ProgressCallback(ULONG BytesSent, ULONG TotalBytes, PVOID Context)
 
 VOID TestMultipleFilesUpload(VOID)
 {
+    DbgPrint("\n[UPLOAD KHTTP] Test multiple files upload\n");
+
     PVOID File1Data = ExAllocatePoolWithTag(NonPagedPool, 512, 'tseT');
     if (!File1Data) return;
     RtlFillMemory(File1Data, 512, 0x11);
@@ -432,7 +438,7 @@ VOID TestMultipleFilesUpload(VOID)
         .UseHttps = TRUE,
         .TimeoutMs = 30000,
         .UserAgent = "KernelHTTP/1.0",
-        .MaxResponseSize = 1024 * 1024,
+        .MaxResponseSize = 5 * 1024 * 1024,
         .DnsServerIp = 0,
         .ProgressCallback = ProgressCallback,
         .CallbackContext = NULL
@@ -465,12 +471,14 @@ VOID TestMultipleFilesUpload(VOID)
 // Test: Large file upload with chunked transfer
 VOID TestLargeFileUploadChunked(VOID)
 {
+    DbgPrint("\n[UPLOAD KHTTP] Test large file chunked upload\n");
+
     // 5MB file
     ULONG FileSize = 5 * 1024 * 1024;
 
     PVOID FileData = ExAllocatePoolWithTag(NonPagedPool, FileSize, 'tseT');
     if (!FileData) {
-        DbgPrint("[Test] Failed to allocate %lu bytes\n", FileSize);
+        DbgPrint("[KHTTP] Failed to allocate %lu bytes\n", FileSize);
         return;
     }
 
@@ -524,6 +532,53 @@ VOID TestLargeFileUploadChunked(VOID)
     ExFreePoolWithTag(FileData, 'tseT');
 }
 
+// Test: File Stream upload with chunked transfer
+VOID TestFileStreamUpload()
+{
+    DbgPrint("\n[UPLOAD KHTTP] Test streaming file chunked upload\n");
+
+    // Initialize file path
+    UNICODE_STRING FilePath;
+    RtlInitUnicodeString(&FilePath, L"\\??\\C:\\test_file.bin");
+
+    KHTTP_FILE File = {
+        .FieldName = "file",
+        .FileName = "test_file.bin",
+        .ContentType = "application/octet-stream",
+        .UseFileStream = TRUE,      // Enable streaming
+        .FilePath = &FilePath,      // File path
+        .Data = NULL,               // Not used
+        .DataLength = 0             // Not used
+    };
+
+    KHTTP_CONFIG Config = {
+        .UseHttps = TRUE,
+        .TimeoutMs = 300000,            // 5 minutes
+        .UseChunkedTransfer = TRUE,
+        .ChunkSize = 256 * 1024,        // 256KB chunks
+        .ProgressCallback = ProgressCallback
+    };
+
+    PKHTTP_RESPONSE Response = NULL;
+    NTSTATUS Status = KhttpPostMultipartChunked(
+        "https://httpbin.org/post",
+        NULL,
+        NULL, 0,
+        &File, 1,
+        &Config,
+        &Response
+    );
+
+    if (NT_SUCCESS(Status) && Response) {
+        DbgPrint("[KHTTP] Streaming file uploaded: %lu\n", Response->StatusCode);
+        KhttpFreeResponse(Response);
+    }
+    else {
+        DbgPrint("[KHTTP] Streaming upload failed: 0x%08X\n", Status);
+    }
+}
+
+
 // =============================================================
 // DRIVER ENTRY
 // =============================================================
@@ -557,15 +612,22 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath) 
 
     // HTTP tests multipart
     TestFileUpload();
+    
     // Delay between tests
     KhttpSleep(2000); // 2 seconds
     TestFileUploadWithForm();
+    
     // Delay between tests
     KhttpSleep(2000); // 2 seconds
     TestMultipleFilesUpload();
+    
     // Delay between tests
     KhttpSleep(2000); // 2 seconds
     TestLargeFileUploadChunked();
+
+    // Delay between tests
+    KhttpSleep(2000); // 2 seconds
+    TestFileStreamUpload();
 
     DbgPrint("\n[Driver] Tests complete\n");
 

@@ -56,6 +56,10 @@ typedef struct _KHTTP_FILE {
     PCHAR ContentType;        // MIME type (e.g., "application/octet-stream")
     PVOID Data;              // File data buffer (must be NonPagedPool)
     ULONG DataLength;        // Size of data in bytes
+
+    // Stream from disk support
+    BOOLEAN UseFileStream;    // TRUE = read from disk, FALSE = use Data buffer
+    PUNICODE_STRING FilePath; // Path to file on disk (if UseFileStream = TRUE)
 } KHTTP_FILE, * PKHTTP_FILE;
 
 // Form field for multipart requests
