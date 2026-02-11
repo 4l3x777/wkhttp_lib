@@ -1813,22 +1813,56 @@ static NTSTATUS KhttpMultipartRequestChunked(
     }
 
     ULONG TotalReceived = 0;
+    BOOLEAN RecvFailed = FALSE;
+
     do {
-        ULONG BytesRecv;
+        ULONG BytesRecv = 0;
         Status = KtlsRecv(Session, (PCHAR)ResponseBuffer + TotalReceived,
             MaxResp - TotalReceived - 1, &BytesRecv);
 
-        if (Status == STATUS_SUCCESS) {
+        if (Status == STATUS_SUCCESS && BytesRecv > 0) {
             TotalReceived += BytesRecv;
         }
-    } while (Status == STATUS_SUCCESS && TotalReceived < MaxResp - 1);
+        else if (Status == STATUS_END_OF_FILE ||
+            Status == STATUS_CONNECTION_RESET ||
+            Status == STATUS_CONNECTION_DISCONNECTED ||
+            Status == STATUS_DATA_NOT_ACCEPTED) {
+            // Server closed connection (normal for chunked encoding with Connection: close)
+            DbgPrint("[KHTTP] Server closed connection: 0x%08X (received %lu bytes)\n",
+                Status, TotalReceived);
 
-    if (TotalReceived > 0) {
+            if (TotalReceived > 0) {
+                // We have data, treat as success
+                Status = STATUS_SUCCESS;
+            }
+            break;
+        }
+        else if (!NT_SUCCESS(Status)) {
+            // Real error
+            DbgPrint("[KHTTP] Receive error: 0x%08X\n", Status);
+            RecvFailed = TRUE;
+            break;
+        }
+
+        // Stop if no data received (timeout or connection closed gracefully)
+        if (BytesRecv == 0) {
+            break;
+        }
+
+    } while (TotalReceived < MaxResp - 1);
+
+    if (TotalReceived > 0 && !RecvFailed) {
         ((PCHAR)ResponseBuffer)[TotalReceived] = '\0';
         Status = KhttpParseResponse((PCHAR)ResponseBuffer, TotalReceived, Response);
+
+        if (NT_SUCCESS(Status)) {
+            DbgPrint("[KHTTP] Received response: %lu bytes, status code: %lu\n",
+                TotalReceived, (*Response)->StatusCode);
+        }
     }
-    else {
+    else if (!RecvFailed) {
         Status = STATUS_NO_DATA_DETECTED;
+        DbgPrint("[KHTTP] No response data received\n");
     }
 
 Cleanup:
