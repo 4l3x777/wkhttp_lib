@@ -11,7 +11,7 @@
 
 #define DEFAULT_TIMEOUT 10000
 #define DEFAULT_MAX_RESPONSE 1048576  // 1MB
-#define DEFAULT_DNS_SERVER INETADDR(8, 8, 8, 8)
+#define DEFAULT_DNS_SERVER INETADDR(1, 0, 0, 1)
 
 // --- Global State ---
 static BOOLEAN g_Initialized = FALSE;
@@ -1359,6 +1359,7 @@ static NTSTATUS KhttpSendChunked(
 }
 
 // Send multipart with file streaming support
+// Send multipart with file streaming support
 static NTSTATUS KhttpSendMultipartWithFiles(
     _In_ PKTLS_SESSION Session,
     _In_ PCHAR Boundary,
@@ -1375,6 +1376,7 @@ static NTSTATUS KhttpSendMultipartWithFiles(
     CHAR PartHeader[1024];
     ULONG TotalSent = 0;
     ULONG64 TotalSize = 0;
+    PVOID ChunkBuffer = NULL;
 
     // Calculate total size for progress
     for (ULONG i = 0; i < FileCount; i++) {
@@ -1391,7 +1393,7 @@ static NTSTATUS KhttpSendMultipartWithFiles(
     }
 
     // Allocate chunk buffer
-    PVOID ChunkBuffer = ExAllocatePoolWithTag(NonPagedPool, ChunkSize, KHTTP_TAG);
+    ChunkBuffer = ExAllocatePoolWithTag(NonPagedPool, ChunkSize, KHTTP_TAG);
     if (!ChunkBuffer) {
         DbgPrint("[KHTTP] Failed to allocate chunk buffer\n");
         return STATUS_INSUFFICIENT_RESOURCES;
@@ -1411,15 +1413,13 @@ static NTSTATUS KhttpSendMultipartWithFiles(
         );
 
         if (!NT_SUCCESS(Status)) {
-            ExFreePoolWithTag(ChunkBuffer, KHTTP_TAG);
-            return Status;
+            goto Cleanup;
         }
 
         Status = KhttpSendChunked(Session, PartHeader, (ULONG)strlen(PartHeader),
             ChunkSize, NULL, NULL);
         if (!NT_SUCCESS(Status)) {
-            ExFreePoolWithTag(ChunkBuffer, KHTTP_TAG);
-            return Status;
+            goto Cleanup;
         }
     }
 
@@ -1439,26 +1439,23 @@ static NTSTATUS KhttpSendMultipartWithFiles(
         );
 
         if (!NT_SUCCESS(Status)) {
-            ExFreePoolWithTag(ChunkBuffer, KHTTP_TAG);
-            return Status;
+            goto Cleanup;
         }
 
         Status = KhttpSendChunked(Session, FilePartHeader, (ULONG)strlen(FilePartHeader),
             ChunkSize, NULL, NULL);
         if (!NT_SUCCESS(Status)) {
-            ExFreePoolWithTag(ChunkBuffer, KHTTP_TAG);
-            return Status;
+            goto Cleanup;
         }
 
         // Send file data
         if (Files[i].UseFileStream && Files[i].FilePath) {
             // STREAM FROM DISK
-            KHTTP_FILE_READER Reader;
+            KHTTP_FILE_READER Reader = { 0 };
             Status = KhttpOpenFileForReading(Files[i].FilePath, &Reader);
             if (!NT_SUCCESS(Status)) {
                 DbgPrint("[KHTTP] Failed to open file for streaming: 0x%08X\n", Status);
-                ExFreePoolWithTag(ChunkBuffer, KHTTP_TAG);
-                return Status;
+                goto Cleanup;
             }
 
             LARGE_INTEGER Offset;
@@ -1477,13 +1474,12 @@ static NTSTATUS KhttpSendMultipartWithFiles(
                 if (!NT_SUCCESS(Status) || BytesRead == 0) {
                     DbgPrint("[KHTTP] File read failed: 0x%08X\n", Status);
                     KhttpCloseFileReader(&Reader);
-                    ExFreePoolWithTag(ChunkBuffer, KHTTP_TAG);
 
                     // Send final chunk to properly close transfer
                     CHAR FinalChunk[] = "0\r\n\r\n";
                     KhttpSendData(Session, FinalChunk, 5, NULL);
 
-                    return Status == STATUS_SUCCESS ? STATUS_UNEXPECTED_IO_ERROR : Status;
+                    goto Cleanup;
                 }
 
                 // Send chunk
@@ -1491,8 +1487,7 @@ static NTSTATUS KhttpSendMultipartWithFiles(
                     ChunkSize, NULL, NULL);
                 if (!NT_SUCCESS(Status)) {
                     KhttpCloseFileReader(&Reader);
-                    ExFreePoolWithTag(ChunkBuffer, KHTTP_TAG);
-                    return Status;
+                    goto Cleanup;
                 }
 
                 Offset.QuadPart += BytesRead;
@@ -1517,8 +1512,7 @@ static NTSTATUS KhttpSendMultipartWithFiles(
             Status = KhttpSendChunked(Session, Files[i].Data, Files[i].DataLength,
                 ChunkSize, NULL, NULL);
             if (!NT_SUCCESS(Status)) {
-                ExFreePoolWithTag(ChunkBuffer, KHTTP_TAG);
-                return Status;
+                goto Cleanup;
             }
             TotalSent += Files[i].DataLength;
         }
@@ -1527,23 +1521,30 @@ static NTSTATUS KhttpSendMultipartWithFiles(
         CHAR PartTrailer[] = "\r\n";
         Status = KhttpSendChunked(Session, PartTrailer, 2, ChunkSize, NULL, NULL);
         if (!NT_SUCCESS(Status)) {
-            ExFreePoolWithTag(ChunkBuffer, KHTTP_TAG);
-            return Status;
+            goto Cleanup;
         }
     }
-
-    ExFreePoolWithTag(ChunkBuffer, KHTTP_TAG);
 
     // 3. Send final boundary
     CHAR FinalBoundary[256];
     Status = RtlStringCchPrintfA(FinalBoundary, sizeof(FinalBoundary),
         "--%s--\r\n", Boundary);
-    if (!NT_SUCCESS(Status)) return Status;
+    if (!NT_SUCCESS(Status)) {
+        goto Cleanup;
+    }
 
     Status = KhttpSendChunked(Session, FinalBoundary, (ULONG)strlen(FinalBoundary),
         ChunkSize, NULL, NULL);
 
-    DbgPrint("[KHTTP] Multipart send complete: %lu bytes\n", TotalSent);
+    if (NT_SUCCESS(Status)) {
+        DbgPrint("[KHTTP] Multipart send complete: %lu bytes\n", TotalSent);
+    }
+
+Cleanup:
+    if (ChunkBuffer) {
+        RtlFillMemory(ChunkBuffer, ChunkSize, 0xDD);  // Debug pattern
+        ExFreePoolWithTag(ChunkBuffer, KHTTP_TAG);
+    }
 
     return Status;
 }
