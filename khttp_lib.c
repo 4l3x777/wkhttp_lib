@@ -1579,23 +1579,35 @@ static NTSTATUS KhttpMultipartRequestChunked(
         }
     }
 
-    // Calculate total body size to decide on chunked transfer
-    ULONG TotalFileSize = 0;
+    // Check if we have stream files - MUST use chunked
+    BOOLEAN HasStreamFiles = FALSE;
     for (ULONG i = 0; i < FileCount; i++) {
-        if (Files[i].Data && Files[i].DataLength > 0) {
-            TotalFileSize += Files[i].DataLength;
+        if (Files && Files[i].UseFileStream) {
+            HasStreamFiles = TRUE;
+            UseChunked = TRUE;  // Force chunked for streaming
+            break;
         }
     }
 
-    // Auto-enable chunked for large bodies (>2MB)
-    if (TotalFileSize > KHTTP_MAX_MEMORY_BODY_SIZE) {
-        UseChunked = TRUE;
-        DbgPrint("[KHTTP] Large body detected (%lu bytes), enabling chunked transfer\n",
-            TotalFileSize);
+    // Calculate total body size to decide on chunked transfer
+    ULONG TotalFileSize = 0;
+    if (!HasStreamFiles) {
+        for (ULONG i = 0; i < FileCount; i++) {
+            if (Files[i].Data && Files[i].DataLength > 0) {
+                TotalFileSize += Files[i].DataLength;
+            }
+        }
+
+        // Auto-enable chunked for large bodies (>2MB)
+        if (TotalFileSize > KHTTP_MAX_MEMORY_BODY_SIZE) {
+            UseChunked = TRUE;
+            DbgPrint("[KHTTP] Large body detected (%lu bytes), enabling chunked transfer\n",
+                TotalFileSize);
+        }
     }
 
-    DbgPrint("[KHTTP] Starting multipart request to %s (chunked: %d)\n",
-        Url, UseChunked);
+    DbgPrint("[KHTTP] Starting multipart request to %s (chunked: %d, streaming: %d)\n",
+        Url, UseChunked, HasStreamFiles);
 
     // Generate boundary
     PCHAR Boundary = KhttpGenerateBoundary();
@@ -1603,23 +1615,30 @@ static NTSTATUS KhttpMultipartRequestChunked(
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    // Build multipart body
+    // Build multipart body ONLY if NOT streaming
     ULONG BodyLength = 0;
-    PCHAR Body = KhttpBuildMultipartBody(
-        FormFields,
-        FormFieldCount,
-        Files,
-        FileCount,
-        Boundary,
-        &BodyLength
-    );
+    PCHAR Body = NULL;
 
-    if (!Body) {
-        ExFreePoolWithTag(Boundary, KHTTP_MULTIPART_TAG);
-        return STATUS_INSUFFICIENT_RESOURCES;
+    if (!HasStreamFiles) {
+        Body = KhttpBuildMultipartBody(
+            FormFields,
+            FormFieldCount,
+            Files,
+            FileCount,
+            Boundary,
+            &BodyLength
+        );
+
+        if (!Body) {
+            ExFreePoolWithTag(Boundary, KHTTP_MULTIPART_TAG);
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+
+        DbgPrint("[KHTTP] Built multipart body: %lu bytes\n", BodyLength);
     }
-
-    DbgPrint("[KHTTP] Built multipart body: %lu bytes\n", BodyLength);
+    else {
+        DbgPrint("[KHTTP] Using streaming mode - body will be built dynamically\n");
+    }
 
     // Build headers
     CHAR ContentTypeHeader[512];
@@ -1633,16 +1652,17 @@ static NTSTATUS KhttpMultipartRequestChunked(
     );
 
     if (!NT_SUCCESS(Status)) {
-        ExFreePoolWithTag(Body, KHTTP_MULTIPART_TAG);
+        if (Body) ExFreePoolWithTag(Body, KHTTP_MULTIPART_TAG);
         ExFreePoolWithTag(Boundary, KHTTP_MULTIPART_TAG);
         return Status;
     }
 
-    // Parse URL and connect (similar to KhttpRequest)
+    // Parse URL and connect
     PCHAR Hostname = NULL, Path = NULL;
     USHORT Port;
     BOOLEAN IsHttps;
     PKTLS_SESSION Session = NULL;
+    PVOID ResponseBuffer = NULL;
 
     Status = KhttpParseUrl(Url, &Hostname, &Port, &Path, &IsHttps);
     if (!NT_SUCCESS(Status)) {
@@ -1675,7 +1695,7 @@ static NTSTATUS KhttpMultipartRequestChunked(
         KtlsSetTimeout(Session, Config->TimeoutMs);
     }
 
-    // Build and send request headers (without body yet for chunked)
+    // Build and send request headers (without body for chunked)
     ULONG RequestLen;
     PCHAR RequestHeaders = KhttpBuildRequest(
         Method,
@@ -1700,19 +1720,10 @@ static NTSTATUS KhttpMultipartRequestChunked(
         goto Cleanup;
     }
 
-    // Send body (chunked or regular)
+    // Send body
     if (UseChunked) {
-        // Check if we have stream files
-        BOOLEAN HasStreamFiles = FALSE;
-        for (ULONG i = 0; i < FileCount; i++) {
-            if (Files && Files[i].UseFileStream) {
-                HasStreamFiles = TRUE;
-                break;
-            }
-        }
-
         if (HasStreamFiles) {
-            // Use streaming function (from previous implementation)
+            // Use streaming function
             Status = KhttpSendMultipartWithFiles(
                 Session,
                 Boundary,
@@ -1726,7 +1737,7 @@ static NTSTATUS KhttpMultipartRequestChunked(
             );
         }
         else {
-            // Use original chunked send
+            // Use regular chunked send with pre-built body
             Status = KhttpSendChunked(
                 Session,
                 Body,
@@ -1738,6 +1749,7 @@ static NTSTATUS KhttpMultipartRequestChunked(
         }
     }
     else {
+        // Regular send with Content-Length
         Status = KtlsSend(Session, Body, BodyLength, &BytesSent);
     }
 
@@ -1746,9 +1758,9 @@ static NTSTATUS KhttpMultipartRequestChunked(
         goto Cleanup;
     }
 
-    // Receive response (same as regular request)
+    // Receive response
     ULONG MaxResp = Config ? Config->MaxResponseSize : DEFAULT_MAX_RESPONSE;
-    PVOID ResponseBuffer = ExAllocatePoolWithTag(NonPagedPool, MaxResp, KHTTP_TAG);
+    ResponseBuffer = ExAllocatePoolWithTag(NonPagedPool, MaxResp, KHTTP_TAG);
     if (!ResponseBuffer) {
         Status = STATUS_INSUFFICIENT_RESOURCES;
         goto Cleanup;
@@ -1773,12 +1785,12 @@ static NTSTATUS KhttpMultipartRequestChunked(
         Status = STATUS_NO_DATA_DETECTED;
     }
 
-    ExFreePoolWithTag(ResponseBuffer, KHTTP_TAG);
-
 Cleanup:
+    // Clean up in correct order
+    if (ResponseBuffer) ExFreePoolWithTag(ResponseBuffer, KHTTP_TAG);
     if (Session) KtlsClose(Session);
-    if (Hostname) ExFreePoolWithTag(Hostname, KHTTP_TAG);
     if (Path) ExFreePoolWithTag(Path, KHTTP_TAG);
+    if (Hostname) ExFreePoolWithTag(Hostname, KHTTP_TAG);
     if (Body) ExFreePoolWithTag(Body, KHTTP_MULTIPART_TAG);
     if (Boundary) ExFreePoolWithTag(Boundary, KHTTP_MULTIPART_TAG);
 
