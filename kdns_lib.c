@@ -464,6 +464,41 @@ static NTSTATUS KdnsResolveInternal(PCHAR Hostname, ULONG DnsServerIp, ULONG Tim
         return STATUS_TOO_MANY_LINKS;
     }
 
+    // Validate hostname before dns query
+    if (!Hostname) {
+        DbgPrint("KDNS: [Error] NULL hostname\n");
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    ULONG HostnameLen = 0;
+    while (Hostname[HostnameLen] != '\0' && HostnameLen < 256) {
+        HostnameLen++;
+    }
+
+    DbgPrint("KDNS: [DEBUG] Hostname to resolve: '%s' (length: %lu)\n",
+        Hostname, HostnameLen);
+
+    // Check length (DNS FQDN max 253, labels max 63)
+    if (HostnameLen == 0) {
+        DbgPrint("KDNS: [Error] Empty hostname\n");
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if (HostnameLen > 253) {
+        DbgPrint("KDNS: [Error] Hostname too long: %lu > 253\n", HostnameLen);
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    // Check for invalid characters
+    for (ULONG i = 0; i < HostnameLen; i++) {
+        CHAR c = Hostname[i];
+        if (c == '/' || c == '?' || c == '#' || c == '\\' || c == ' ') {
+            DbgPrint("KDNS: [Error] Invalid character '%c' (0x%02X) at position %lu in hostname: %s\n",
+                c, (UCHAR)c, i, Hostname);
+            return STATUS_INVALID_PARAMETER;
+        }
+    }
+
     USHORT LocalPort = KdnsGetUniquePort();
     DbgPrint("KDNS: Resolving %s using local port %u (depth: %lu)\n", Hostname, LocalPort, Depth);
 
@@ -711,7 +746,7 @@ NTSTATUS KdnsResolveWithCache(
         }
         RtlCopyMemory(CleanHostname, Hostname, HostnameLen);
         CleanHostname[HostnameLen] = '\0';
-        DbgPrint("KDNS: [Fix] Stripped path from hostname: '%s' -> '%s'\n", Hostname, CleanHostname);
+        DbgPrint("KDNS: Stripped path from hostname: '%s' -> '%s'\n", Hostname, CleanHostname);
         Hostname = CleanHostname;
     }
 
