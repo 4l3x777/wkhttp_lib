@@ -289,30 +289,63 @@ static NTSTATUS KdnsSendAndRecvWithPort(
     KEVENT Event;
     PMDL Mdl;
 
-    // 1. Open UDP Address with SPECIFIC LOCAL PORT
-    UCHAR EaBuf[sizeof(FILE_FULL_EA_INFORMATION) + sizeof(TdiTransportAddress) + sizeof(TA_IP_ADDRESS)] = { 0 };
+    // 1. Calculate EA buffer
+    // FILE_FULL_EA_INFORMATION already contain EaName[1], then decrease 1
+    ULONG EaBufSize = sizeof(FILE_FULL_EA_INFORMATION) - 1 +
+        sizeof(TdiTransportAddress) +
+        sizeof(TA_IP_ADDRESS);
+
+    // Use stack buffer
+    UCHAR EaBuf[256];
+
+    if (EaBufSize > sizeof(EaBuf)) {
+        DbgPrint("KDNS: [Error] EA buffer too small (need %lu, have %lu)\n",
+            EaBufSize, (ULONG)sizeof(EaBuf));
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    RtlZeroMemory(EaBuf, sizeof(EaBuf));
+
     PFILE_FULL_EA_INFORMATION Ea = (PFILE_FULL_EA_INFORMATION)EaBuf;
     PTA_IP_ADDRESS TaIp;
 
     RtlInitUnicodeString(&Name, UDP_DEVICE_NAME);
     InitializeObjectAttributes(&Attr, &Name, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
 
-    Ea->EaNameLength = sizeof(TdiTransportAddress) - 1;
-    RtlCopyMemory(Ea->EaName, TdiTransportAddress, Ea->EaNameLength + 1);
+    // Settings EA
+    Ea->NextEntryOffset = 0;
+    Ea->Flags = 0;
+    Ea->EaNameLength = sizeof(TdiTransportAddress) - 1;  //  without null terminator
     Ea->EaValueLength = sizeof(TA_IP_ADDRESS);
 
+    // Copy EA name
+    RtlCopyMemory(Ea->EaName, TdiTransportAddress, Ea->EaNameLength + 1);
+
+    // Pointer to EA value (aftrer name + null terminator)
     TaIp = (PTA_IP_ADDRESS)(Ea->EaName + Ea->EaNameLength + 1);
     TaIp->TAAddressCount = 1;
     TaIp->Address[0].AddressLength = TDI_ADDRESS_LENGTH_IP;
     TaIp->Address[0].AddressType = TDI_ADDRESS_TYPE_IP;
 
     // Bind to specific local port
-    TaIp->Address[0].Address[0].sin_port = HTONS(LocalPort);  // Use unique port
+    TaIp->Address[0].Address[0].sin_port = HTONS(LocalPort);
     TaIp->Address[0].Address[0].in_addr = 0;  // INADDR_ANY
+
     DbgPrint("KDNS: Binding to local port %u\n", LocalPort);
 
-    Status = ZwCreateFile(&AddrHandle, FILE_GENERIC_READ | FILE_GENERIC_WRITE, &Attr, &IoStatus, NULL, 0, 0,
-        FILE_CREATE, 0, Ea, sizeof(EaBuf));
+    Status = ZwCreateFile(
+        &AddrHandle,
+        FILE_GENERIC_READ | FILE_GENERIC_WRITE,
+        &Attr,
+        &IoStatus,
+        NULL,
+        0,
+        0,
+        FILE_CREATE,
+        0,
+        Ea,
+        EaBufSize
+    );
 
     if (!NT_SUCCESS(Status)) {
         DbgPrint("KDNS: [Error] ZwCreateFile failed: 0x%08X (port %u)\n", Status, LocalPort);
