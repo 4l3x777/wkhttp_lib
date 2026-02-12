@@ -289,22 +289,10 @@ static NTSTATUS KdnsSendAndRecvWithPort(
     KEVENT Event;
     PMDL Mdl;
 
-    // 1. Calculate EA buffer
-    // FILE_FULL_EA_INFORMATION already contain EaName[1], then decrease 1
-    ULONG EaBufSize = sizeof(FILE_FULL_EA_INFORMATION) - 1 +
-        sizeof(TdiTransportAddress) +
-        sizeof(TA_IP_ADDRESS);
-
-    // Use stack buffer
-    UCHAR EaBuf[256];
-
-    if (EaBufSize > sizeof(EaBuf)) {
-        DbgPrint("KDNS: [Error] EA buffer too small (need %lu, have %lu)\n",
-            EaBufSize, (ULONG)sizeof(EaBuf));
-        return STATUS_INSUFFICIENT_RESOURCES;
-    }
-
-    RtlZeroMemory(EaBuf, sizeof(EaBuf));
+    // 1. Open UDP address with specific local port
+    CHAR EaBuf[sizeof(FILE_FULL_EA_INFORMATION) +
+        TDI_TRANSPORT_ADDRESS_LENGTH +
+        sizeof(TA_IP_ADDRESS)] = { 0 };
 
     PFILE_FULL_EA_INFORMATION Ea = (PFILE_FULL_EA_INFORMATION)EaBuf;
     PTA_IP_ADDRESS TaIp;
@@ -312,24 +300,22 @@ static NTSTATUS KdnsSendAndRecvWithPort(
     RtlInitUnicodeString(&Name, UDP_DEVICE_NAME);
     InitializeObjectAttributes(&Attr, &Name, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
 
-    // Settings EA
     Ea->NextEntryOffset = 0;
     Ea->Flags = 0;
-    Ea->EaNameLength = sizeof(TdiTransportAddress) - 1;  //  without null terminator
+    Ea->EaNameLength = TDI_TRANSPORT_ADDRESS_LENGTH; 
     Ea->EaValueLength = sizeof(TA_IP_ADDRESS);
 
-    // Copy EA name
-    RtlCopyMemory(Ea->EaName, TdiTransportAddress, Ea->EaNameLength + 1);
+    // EaName: "TdiTransportAddress\0"
+    RtlCopyMemory(Ea->EaName, TdiTransportAddress, TDI_TRANSPORT_ADDRESS_LENGTH + 1);
 
-    // Pointer to EA value (aftrer name + null terminator)
-    TaIp = (PTA_IP_ADDRESS)(Ea->EaName + Ea->EaNameLength + 1);
+    // EaValue (TA_IP_ADDRESS)
+    TaIp = (PTA_IP_ADDRESS)(Ea->EaName + TDI_TRANSPORT_ADDRESS_LENGTH + 1);
     TaIp->TAAddressCount = 1;
     TaIp->Address[0].AddressLength = TDI_ADDRESS_LENGTH_IP;
     TaIp->Address[0].AddressType = TDI_ADDRESS_TYPE_IP;
 
-    // Bind to specific local port
     TaIp->Address[0].Address[0].sin_port = HTONS(LocalPort);
-    TaIp->Address[0].Address[0].in_addr = 0;  // INADDR_ANY
+    TaIp->Address[0].Address[0].in_addr = 0; // INADDR_ANY
 
     DbgPrint("KDNS: Binding to local port %u\n", LocalPort);
 
@@ -344,7 +330,7 @@ static NTSTATUS KdnsSendAndRecvWithPort(
         FILE_CREATE,
         0,
         Ea,
-        EaBufSize
+        sizeof(EaBuf)
     );
 
     if (!NT_SUCCESS(Status)) {
@@ -376,7 +362,8 @@ static NTSTATUS KdnsSendAndRecvWithPort(
     }
     MmBuildMdlForNonPagedPool(Mdl);
 
-    PTDI_CONNECTION_INFORMATION ConnInfo = KdnsAlloc(sizeof(TDI_CONNECTION_INFORMATION) + sizeof(TA_IP_ADDRESS));
+    PTDI_CONNECTION_INFORMATION ConnInfo =
+        KdnsAlloc(sizeof(TDI_CONNECTION_INFORMATION) + sizeof(TA_IP_ADDRESS));
     if (!ConnInfo) {
         IoFreeMdl(Mdl);
         IoFreeIrp(Irp);
@@ -390,6 +377,7 @@ static NTSTATUS KdnsSendAndRecvWithPort(
     IP->Address[0].AddressType = TDI_ADDRESS_TYPE_IP;
     IP->Address[0].Address[0].sin_port = HTONS(53);  // DNS server port
     IP->Address[0].Address[0].in_addr = ServerIp;
+
     ConnInfo->RemoteAddressLength = sizeof(TA_IP_ADDRESS);
     ConnInfo->RemoteAddress = IP;
 
@@ -457,7 +445,6 @@ cleanup:
     ObDereferenceObject(AddrObj);
     ZwClose(AddrHandle);
 
-    // Delay after closing to release port
     LARGE_INTEGER Delay;
     Delay.QuadPart = -10000LL * 150; // 150ms delay
     KeDelayExecutionThread(KernelMode, FALSE, &Delay);
