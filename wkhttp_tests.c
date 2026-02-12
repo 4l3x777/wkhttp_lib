@@ -510,7 +510,7 @@ VOID TestLargeFileUploadChunked(VOID)
 
     PKHTTP_RESPONSE Response = NULL;
     NTSTATUS Status = KhttpPostMultipartChunked(
-        "https://httpbin.org/post",
+        "https://webhook.site/a6cbee2d-7bc2-4f51-88e3-4dc81cd14a56",
         NULL,
         NULL,
         0,
@@ -561,7 +561,7 @@ VOID TestFileStreamUpload()
 
     PKHTTP_RESPONSE Response = NULL;
     NTSTATUS Status = KhttpPostMultipartChunked(
-        "https://httpbin.org/post",
+        "https://webhook.site/a6cbee2d-7bc2-4f51-88e3-4dc81cd14a56",
         NULL,
         NULL, 0,
         &File, 1,

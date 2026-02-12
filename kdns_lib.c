@@ -690,6 +690,37 @@ NTSTATUS KdnsResolveWithCache(
 
     *ResolvedIp = 0;
 
+    CHAR CleanHostname[256];
+    PCHAR PathStart = NULL;
+    ULONG HostnameLen = 0;
+
+    // Find '/' or '?' which indicates path/query start
+    for (PCHAR p = Hostname; *p != '\0'; p++) {
+        if (*p == '/' || *p == '?') {
+            PathStart = p;
+            break;
+        }
+        HostnameLen++;
+    }
+
+    // Copy only hostname part (without path)
+    if (PathStart != NULL) {
+        if (HostnameLen >= sizeof(CleanHostname)) {
+            DbgPrint("KDNS: [Error] Hostname too long: %lu bytes\n", HostnameLen);
+            return STATUS_INVALID_PARAMETER;
+        }
+        RtlCopyMemory(CleanHostname, Hostname, HostnameLen);
+        CleanHostname[HostnameLen] = '\0';
+        DbgPrint("KDNS: [Fix] Stripped path from hostname: '%s' -> '%s'\n", Hostname, CleanHostname);
+        Hostname = CleanHostname;
+    }
+
+    // Check hostname length (DNS label max 63 chars, FQDN max 253)
+    if (HostnameLen > 253) {
+        DbgPrint("KDNS: [Error] Hostname exceeds 253 characters\n");
+        return STATUS_INVALID_PARAMETER;
+    }
+
     // Check cache
     if (KdnsLookupCache(Hostname, ResolvedIp)) {
         return STATUS_SUCCESS;
