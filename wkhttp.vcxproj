@@ -35,7 +35,11 @@
     </ProjectConfiguration>
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="kdns_cache.c" />
+    <ClCompile Include="kdns_ip.c" />
     <ClCompile Include="kdns_lib.c" />
+    <ClCompile Include="kdns_packet.c" />
+    <ClCompile Include="kdns_tdi.c" />
     <ClCompile Include="khttp_lib.c" />
     <ClCompile Include="ktls_lib.c" />
     <ClCompile Include="library\aes.c" />
@@ -229,7 +233,12 @@
     <ClInclude Include="include\psa\crypto_struct.h" />
     <ClInclude Include="include\psa\crypto_types.h" />
     <ClInclude Include="include\psa\crypto_values.h" />
+    <ClInclude Include="kdns_cache.h" />
+    <ClInclude Include="kdns_ip.h" />
     <ClInclude Include="kdns_lib.h" />
+    <ClInclude Include="kdns_packet.h" />
+    <ClInclude Include="kdns_tdi.h" />
+    <ClInclude Include="kdns_types.h" />
     <ClInclude Include="khttp_lib.h" />
     <ClInclude Include="ktls_lib.h" />
     <ClInclude Include="library\check_crypto_config.h" />
