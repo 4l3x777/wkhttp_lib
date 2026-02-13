@@ -495,7 +495,7 @@ static NTSTATUS KdnsResolveInternal(PCHAR Hostname, ULONG DnsServerIp, ULONG Tim
         HostnameLen++;
     }
 
-    DbgPrint("KDNS: [DEBUG] Hostname to resolve: '%s' (length: %lu)\n",
+    DbgPrint("KDNS: Hostname to resolve: '%s' (length: %lu)\n",
         Hostname, HostnameLen);
 
     // Check length (DNS FQDN max 253, labels max 63)
