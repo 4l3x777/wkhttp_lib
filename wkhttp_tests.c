@@ -9,10 +9,6 @@
  * - REST API tests
  * - File upload tests (single, multiple, streaming, chunked)
  * 
- * @author 4l3x777
- * @date 2026
- * @version 1.0
- * 
  * @section test_organization Test Organization
  * 1. DNS Resolution Tests
  * 2. TLS/DTLS Connection Tests
