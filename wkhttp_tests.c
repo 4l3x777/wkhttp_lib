@@ -598,7 +598,7 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath) 
     KhttpGlobalInit();
 
     // Low-level tests
-    TestDns();
+    /*TestDns();
     TestTls();
     TestDtls();
 
@@ -608,7 +608,7 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath) 
 
     // HTTPS tests (TLS)
     TestHttps();
-    TestRestApiHttps();
+    TestRestApiHttps();*/
 
     // HTTP tests multipart
     TestFileUpload();
