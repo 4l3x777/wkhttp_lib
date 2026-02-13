@@ -14,6 +14,10 @@
 #define DEFAULT_DNS_SERVER INETADDR(1, 0, 0, 1)
 #define MAX_SEND_SIZE 65536  // 64KB per TLS send
 
+// Chunked transfer limits
+#define MAX_CHUNK_SIZE (16 * 1024 * 1024)  // 16MB max chunk size
+#define MAX_CHUNK_LINE_LENGTH 16           // Max length for chunk size line (hex + CRLF)
+
 // ========================================
 // INTERNAL STRUCTURES
 // ========================================
@@ -101,6 +105,83 @@ static PCHAR KhttpStrDup(PCHAR Str) {
         Dup[Len] = '\0';
     }
     return Dup;
+}
+
+// ========================================
+// SAFE MEMORY OPERATIONS
+// ========================================
+
+/**
+ * @brief Safe memory copy with exception handling and bounds checking
+ * 
+ * Wraps RtlCopyMemory in SEH to catch access violations.
+ * Prevents BSOD from invalid memory access during chunk parsing.
+ * 
+ * @param Dest Destination buffer
+ * @param Src Source buffer
+ * @param Length Number of bytes to copy
+ * @return STATUS_SUCCESS on success, STATUS_ACCESS_VIOLATION on fault
+ */
+static NTSTATUS KhttpSafeMemcpy(
+    _Out_writes_bytes_(Length) PVOID Dest,
+    _In_reads_bytes_(Length) PVOID Src,
+    _In_ SIZE_T Length
+)
+{
+    if (!Dest || !Src || Length == 0) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    // Sanity check for absurd lengths
+    if (Length > MAX_CHUNK_SIZE) {
+        DbgPrint("[KHTTP] [ERROR] SafeMemcpy: Excessive length %zu (max %u)\n",
+            Length, MAX_CHUNK_SIZE);
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    __try {
+        RtlCopyMemory(Dest, Src, Length);
+        return STATUS_SUCCESS;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        ULONG ExceptionCode = GetExceptionCode();
+        DbgPrint("[KHTTP] [ERROR] SafeMemcpy exception: 0x%08X\n", ExceptionCode);
+        DbgPrint("[KHTTP] [ERROR]   Dest=%p, Src=%p, Length=%zu\n", Dest, Src, Length);
+        return STATUS_ACCESS_VIOLATION;
+    }
+}
+
+/**
+ * @brief Validate memory address range
+ * 
+ * @param Address Starting address
+ * @param Length Length of memory range
+ * @return TRUE if address appears valid, FALSE otherwise
+ */
+static BOOLEAN KhttpIsAddressValid(
+    _In_ PVOID Address,
+    _In_ SIZE_T Length
+)
+{
+    if (!Address || Length == 0) {
+        return FALSE;
+    }
+
+    // Check for overflow
+    if ((ULONG_PTR)Address + Length < (ULONG_PTR)Address) {
+        DbgPrint("[KHTTP] [ERROR] Address overflow detected: %p + %zu\n",
+            Address, Length);
+        return FALSE;
+    }
+
+    // Basic validity check
+    __try {
+        ProbeForRead(Address, Length, 1);
+        return TRUE;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return FALSE;
+    }
 }
 
 // ========================================
@@ -492,19 +573,57 @@ static NTSTATUS KhttpReceiveResponse(
     _In_ ULONG MaxResponseSize,
     _Out_ PKHTTP_RESPONSE* Response
 ) {
-    PVOID Buffer = ExAllocatePoolWithTag(NonPagedPool, MaxResponseSize, KHTTP_TAG);
-    if (!Buffer) return STATUS_INSUFFICIENT_RESOURCES;
+    // Ensure reasonable buffer size
+    if (MaxResponseSize > 100 * 1024 * 1024) {  // 100MB limit
+        DbgPrint("[KHTTP] [WARN] Response size too large: %lu, clamping to 100MB\n",
+            MaxResponseSize);
+        MaxResponseSize = 100 * 1024 * 1024;
+    }
 
+    PVOID Buffer = ExAllocatePoolWithTag(NonPagedPool, MaxResponseSize, KHTTP_TAG);
+    if (!Buffer) {
+        DbgPrint("[KHTTP] [ERROR] Failed to allocate %lu bytes for response\n",
+            MaxResponseSize);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    RtlZeroMemory(Buffer, MaxResponseSize);
     ULONG TotalReceived = 0;
     NTSTATUS Status = STATUS_SUCCESS;
 
+    DbgPrint("[KHTTP] Receiving response (max %lu bytes)...\n", MaxResponseSize);
+
     do {
+        // Ensure we don't overflow buffer
+        if (TotalReceived >= MaxResponseSize - 1) {
+            DbgPrint("[KHTTP] [WARN] Response buffer full at %lu bytes\n", TotalReceived);
+            break;
+        }
+
         ULONG BytesRecv = 0;
-        Status = KtlsRecv(Connection->Session, (PCHAR)Buffer + TotalReceived,
-            MaxResponseSize - TotalReceived - 1, &BytesRecv);
+        ULONG MaxRecv = MaxResponseSize - TotalReceived - 1;
+        
+        __try {
+            Status = KtlsRecv(Connection->Session, (PCHAR)Buffer + TotalReceived,
+                MaxRecv, &BytesRecv);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER) {
+            DbgPrint("[KHTTP] [ERROR] Exception in KtlsRecv: 0x%08X\n",
+                GetExceptionCode());
+            Status = STATUS_ACCESS_VIOLATION;
+            break;
+        }
 
         if (Status == STATUS_SUCCESS && BytesRecv > 0) {
+            // Validate received bytes don't exceed buffer
+            if (BytesRecv > MaxRecv) {
+                DbgPrint("[KHTTP] [ERROR] Received %lu bytes exceeds max %lu\n",
+                    BytesRecv, MaxRecv);
+                Status = STATUS_BUFFER_OVERFLOW;
+                break;
+            }
             TotalReceived += BytesRecv;
+            DbgPrint("[KHTTP] Received %lu bytes (total: %lu)\n", BytesRecv, TotalReceived);
         }
         else if (Status == STATUS_END_OF_FILE ||
                  Status == STATUS_CONNECTION_RESET ||
@@ -513,13 +632,18 @@ static NTSTATUS KhttpReceiveResponse(
             if (TotalReceived > 0) {
                 Status = STATUS_SUCCESS;
             }
+            DbgPrint("[KHTTP] Connection closed, total received: %lu bytes\n", TotalReceived);
             break;
         }
         else if (!NT_SUCCESS(Status)) {
+            DbgPrint("[KHTTP] [ERROR] Receive failed: 0x%08X\n", Status);
             break;
         }
 
-        if (BytesRecv == 0) break;
+        if (BytesRecv == 0) {
+            DbgPrint("[KHTTP] No more data to receive\n");
+            break;
+        }
 
     } while (TotalReceived < MaxResponseSize - 1);
 
@@ -528,6 +652,7 @@ static NTSTATUS KhttpReceiveResponse(
         Status = KhttpParseResponse((PCHAR)Buffer, TotalReceived, Response);
     }
     else if (TotalReceived == 0) {
+        DbgPrint("[KHTTP] [WARN] No data received\n");
         Status = STATUS_NO_DATA_DETECTED;
     }
 
@@ -561,6 +686,13 @@ static NTSTATUS KhttpChunkedEncoderSend(
     _In_ ULONG Length
 ) {
     if (Length == 0) return STATUS_SUCCESS;
+
+    // Validate chunk length
+    if (Length > MAX_CHUNK_SIZE) {
+        DbgPrint("[KHTTP] [ERROR] Chunk too large: %lu bytes (max %u)\n",
+            Length, MAX_CHUNK_SIZE);
+        return STATUS_INVALID_PARAMETER;
+    }
 
     // Format chunk header
     CHAR ChunkHeader[32];
@@ -993,9 +1125,21 @@ VOID KhttpFreeResponse(_In_ PKHTTP_RESPONSE Response) {
 }
 
 // ========================================
-// CHUNKED DECODING
+// CHUNKED DECODING (WITH VALIDATION)
 // ========================================
 
+/**
+ * @brief Decode HTTP chunked transfer encoding with full validation
+ * 
+ * Parses chunked response data according to RFC 7230 Section 4.1.
+ * Includes extensive validation to prevent buffer overflows and crashes.
+ * 
+ * @param ChunkedData Raw chunked data from HTTP response body
+ * @param ChunkedLength Total length of chunked data
+ * @param DecodedData Output buffer for decoded data (caller must free)
+ * @param DecodedLength Output length of decoded data
+ * @return STATUS_SUCCESS on success, error code on failure
+ */
 NTSTATUS KhttpDecodeChunked(
     _In_ PCHAR ChunkedData,
     _In_ ULONG ChunkedLength,
@@ -1003,52 +1147,182 @@ NTSTATUS KhttpDecodeChunked(
     _Out_ PULONG DecodedLength
 )
 {
-    if (!ChunkedData || !DecodedData || !DecodedLength)
+    if (!ChunkedData || !DecodedData || !DecodedLength) {
+        DbgPrint("[KHTTP] [ERROR] KhttpDecodeChunked: Invalid parameters\n");
         return STATUS_INVALID_PARAMETER;
+    }
 
+    if (ChunkedLength == 0 || ChunkedLength > MAX_CHUNK_SIZE) {
+        DbgPrint("[KHTTP] [ERROR] Invalid chunked length: %lu (max %u)\n",
+            ChunkedLength, MAX_CHUNK_SIZE);
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    // Validate source buffer
+    if (!KhttpIsAddressValid(ChunkedData, ChunkedLength)) {
+        DbgPrint("[KHTTP] [ERROR] Invalid source buffer address: %p (len=%lu)\n",
+            ChunkedData, ChunkedLength);
+        return STATUS_ACCESS_VIOLATION;
+    }
+
+    DbgPrint("[KHTTP] Decoding chunked data: %lu bytes\n", ChunkedLength);
+
+    // Allocate output buffer (same size as input, will be smaller or equal)
     PCHAR Decoded = (PCHAR)ExAllocatePoolWithTag(NonPagedPool, ChunkedLength, KHTTP_MULTIPART_TAG);
-    if (!Decoded) return STATUS_INSUFFICIENT_RESOURCES;
+    if (!Decoded) {
+        DbgPrint("[KHTTP] [ERROR] Failed to allocate %lu bytes for decoded data\n",
+            ChunkedLength);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    RtlZeroMemory(Decoded, ChunkedLength);
 
     PCHAR Source = ChunkedData;
+    PCHAR SourceEnd = ChunkedData + ChunkedLength;
     PCHAR Dest = Decoded;
     ULONG TotalDecoded = 0;
+    ULONG ChunkCount = 0;
 
-    while (TRUE) {
+    while (Source < SourceEnd) {
+        // Parse chunk size (hex number)
         ULONG ChunkSize = 0;
-        while (*Source != '\r' && Source < ChunkedData + ChunkedLength) {
-            char c = *Source++;
+        ULONG HexDigits = 0;
+        BOOLEAN OverflowDetected = FALSE;
+
+        DbgPrint("[KHTTP] [CHUNK %lu] Parsing size at offset %lu\n",
+            ChunkCount, (ULONG)(Source - ChunkedData));
+
+        // Parse hex chunk size with overflow detection
+        while (Source < SourceEnd && *Source != '\r' && HexDigits < MAX_CHUNK_LINE_LENGTH) {
+            char c = *Source;
+            ULONG digit = 0;
+
             if (c >= '0' && c <= '9') {
-                ChunkSize = ChunkSize * 16 + (c - '0');
+                digit = c - '0';
             }
             else if (c >= 'a' && c <= 'f') {
-                ChunkSize = ChunkSize * 16 + (c - 'a' + 10);
+                digit = c - 'a' + 10;
             }
             else if (c >= 'A' && c <= 'F') {
-                ChunkSize = ChunkSize * 16 + (c - 'A' + 10);
+                digit = c - 'A' + 10;
             }
-            else {
+            else if (c == ';' || c == ' ') {
+                // Chunk extension, skip to CRLF
                 break;
             }
+            else {
+                // Invalid character
+                DbgPrint("[KHTTP] [ERROR] Invalid hex char '%c' at offset %lu\n",
+                    c, (ULONG)(Source - ChunkedData));
+                ExFreePoolWithTag(Decoded, KHTTP_MULTIPART_TAG);
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            // Check for overflow before multiplication
+            if (ChunkSize > (MAX_CHUNK_SIZE / 16)) {
+                OverflowDetected = TRUE;
+                break;
+            }
+
+            ULONG NewChunkSize = ChunkSize * 16 + digit;
+            
+            // Check for overflow after addition
+            if (NewChunkSize < ChunkSize) {
+                OverflowDetected = TRUE;
+                break;
+            }
+
+            ChunkSize = NewChunkSize;
+            Source++;
+            HexDigits++;
         }
 
-        if (*Source == '\r') Source++;
-        if (*Source == '\n') Source++;
+        if (OverflowDetected || ChunkSize > MAX_CHUNK_SIZE) {
+            DbgPrint("[KHTTP] [ERROR] Chunk size too large or overflow: 0x%X (max 0x%X)\n",
+                ChunkSize, MAX_CHUNK_SIZE);
+            ExFreePoolWithTag(Decoded, KHTTP_MULTIPART_TAG);
+            return STATUS_INTEGER_OVERFLOW;
+        }
 
-        if (ChunkSize == 0) break;
+        // Skip to CRLF (chunk extensions)
+        while (Source < SourceEnd && *Source != '\r') {
+            Source++;
+        }
 
-        if (Source + ChunkSize > ChunkedData + ChunkedLength) {
+        // Expect CRLF
+        if (Source >= SourceEnd || *Source != '\r') {
+            DbgPrint("[KHTTP] [ERROR] Expected CR at offset %lu\n",
+                (ULONG)(Source - ChunkedData));
             ExFreePoolWithTag(Decoded, KHTTP_MULTIPART_TAG);
             return STATUS_INVALID_PARAMETER;
         }
+        Source++; // Skip CR
 
-        RtlCopyMemory(Dest, Source, ChunkSize);
+        if (Source >= SourceEnd || *Source != '\n') {
+            DbgPrint("[KHTTP] [ERROR] Expected LF at offset %lu\n",
+                (ULONG)(Source - ChunkedData));
+            ExFreePoolWithTag(Decoded, KHTTP_MULTIPART_TAG);
+            return STATUS_INVALID_PARAMETER;
+        }
+        Source++; // Skip LF
+
+        DbgPrint("[KHTTP] [CHUNK %lu] Size: %lu (0x%X) bytes\n",
+            ChunkCount, ChunkSize, ChunkSize);
+
+        // Last chunk (size = 0)
+        if (ChunkSize == 0) {
+            DbgPrint("[KHTTP] [CHUNK %lu] Last chunk reached\n", ChunkCount);
+            break;
+        }
+
+        // Validate chunk size against remaining input
+        if (Source + ChunkSize > SourceEnd) {
+            DbgPrint("[KHTTP] [ERROR] Chunk exceeds buffer: offset %lu + size %lu > total %lu\n",
+                (ULONG)(Source - ChunkedData), ChunkSize, ChunkedLength);
+            ExFreePoolWithTag(Decoded, KHTTP_MULTIPART_TAG);
+            return STATUS_BUFFER_OVERFLOW;
+        }
+
+        // Validate chunk won't overflow output buffer
+        if (TotalDecoded + ChunkSize > ChunkedLength) {
+            DbgPrint("[KHTTP] [ERROR] Output overflow: %lu + %lu > %lu\n",
+                TotalDecoded, ChunkSize, ChunkedLength);
+            ExFreePoolWithTag(Decoded, KHTTP_MULTIPART_TAG);
+            return STATUS_BUFFER_OVERFLOW;
+        }
+
+        // Copy chunk data with safe memcpy
+        NTSTATUS Status = KhttpSafeMemcpy(Dest, Source, ChunkSize);
+        if (!NT_SUCCESS(Status)) {
+            DbgPrint("[KHTTP] [ERROR] SafeMemcpy failed for chunk %lu: 0x%08X\n",
+                ChunkCount, Status);
+            ExFreePoolWithTag(Decoded, KHTTP_MULTIPART_TAG);
+            return Status;
+        }
+
         Dest += ChunkSize;
         Source += ChunkSize;
         TotalDecoded += ChunkSize;
+        ChunkCount++;
 
-        if (*Source == '\r') Source++;
-        if (*Source == '\n') Source++;
+        DbgPrint("[KHTTP] [CHUNK %lu] Copied %lu bytes, total: %lu\n",
+            ChunkCount - 1, ChunkSize, TotalDecoded);
+
+        // Expect trailing CRLF after chunk data
+        if (Source >= SourceEnd || *Source != '\r') {
+            DbgPrint("[KHTTP] [WARN] Expected CR after chunk data at offset %lu\n",
+                (ULONG)(Source - ChunkedData));
+            // Some servers may omit trailing CRLF, continue anyway
+        } else {
+            Source++; // Skip CR
+            if (Source < SourceEnd && *Source == '\n') {
+                Source++; // Skip LF
+            }
+        }
     }
+
+    DbgPrint("[KHTTP] Chunked decoding complete: %lu chunks, %lu bytes decoded\n",
+        ChunkCount, TotalDecoded);
 
     *DecodedData = Decoded;
     *DecodedLength = TotalDecoded;
