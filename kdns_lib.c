@@ -684,6 +684,102 @@ static NTSTATUS KdnsSendAndRecv(
 // RECURSIVE DNS RESOLUTION WITH CNAME SUPPORT
 // =============================================================
 
+/**
+ * Check if a string is a valid IPv4 address
+ * Returns TRUE if hostname is in format: X.X.X.X (where X = 0-255)
+ */
+static BOOLEAN IsIpAddress(PCSTR Hostname, ULONG Length)
+{
+    ULONG dotCount = 0;
+    ULONG digitCount = 0;
+    ULONG segmentValue = 0;
+
+    if (!Hostname || Length == 0 || Length > 15) {
+        return FALSE;  // IPv4 max: "255.255.255.255" = 15 chars
+    }
+
+    for (ULONG i = 0; i < Length; i++)
+    {
+        CHAR c = Hostname[i];
+
+        if (c >= '0' && c <= '9')
+        {
+            // Digit
+            digitCount++;
+            segmentValue = segmentValue * 10 + (c - '0');
+
+            // IPv4 segment must be 0-255
+            if (segmentValue > 255 || digitCount > 3)
+                return FALSE;
+        }
+        else if (c == '.')
+        {
+            // Dot separator
+            if (digitCount == 0)  // No digits before dot
+                return FALSE;
+
+            dotCount++;
+            digitCount = 0;
+            segmentValue = 0;
+
+            // IPv4 has exactly 3 dots
+            if (dotCount > 3)
+                return FALSE;
+        }
+        else
+        {
+            // Invalid character for IP address
+            return FALSE;
+        }
+    }
+
+    // Valid IPv4: exactly 3 dots, last segment has digits
+    return (dotCount == 3 && digitCount > 0);
+}
+
+/**
+ * Convert string IP address to ULONG (network byte order)
+ * Example: "192.168.1.1" -> 0x0101A8C0
+ */
+static NTSTATUS ParseIpAddress(PCSTR Hostname, ULONG Length, PULONG OutIpAddress)
+{
+    ULONG ipParts[4] = { 0 };
+    ULONG partIndex = 0;
+    ULONG currentValue = 0;
+
+    for (ULONG i = 0; i < Length; i++)
+    {
+        CHAR c = Hostname[i];
+
+        if (c >= '0' && c <= '9')
+        {
+            currentValue = currentValue * 10 + (c - '0');
+        }
+        else if (c == '.')
+        {
+            if (partIndex >= 4) {
+                return STATUS_INVALID_PARAMETER;
+            }
+            ipParts[partIndex++] = currentValue;
+            currentValue = 0;
+        }
+    }
+
+    // Last segment
+    if (partIndex != 3) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    ipParts[partIndex] = currentValue;
+
+    // Convert to network byte order (little-endian)
+    *OutIpAddress = (ipParts[0]) | (ipParts[1] << 8) | (ipParts[2] << 16) | (ipParts[3] << 24);
+
+    DbgPrint("KDNS: [INFO] Parsed IP address: %u.%u.%u.%u -> 0x%08X\n",
+        ipParts[0], ipParts[1], ipParts[2], ipParts[3], *OutIpAddress);
+
+    return STATUS_SUCCESS;
+}
+
 static NTSTATUS KdnsResolveInternal(PCHAR Hostname, ULONG DnsServerIp, ULONG TimeoutMs, PULONG ResolvedIp, ULONG Depth) {
     if (Depth >= DNS_MAX_CNAME_DEPTH) {
         DbgPrint("KDNS: [Error] CNAME chain too deep (>%d)\n", DNS_MAX_CNAME_DEPTH);
@@ -703,6 +799,23 @@ static NTSTATUS KdnsResolveInternal(PCHAR Hostname, ULONG DnsServerIp, ULONG Tim
 
     DbgPrint("KDNS: Hostname to resolve: '%s' (length: %lu)\n",
         Hostname, HostnameLen);
+
+    // Check if hostname is already an IP address
+    if (IsIpAddress(Hostname, HostnameLen))
+    {
+        DbgPrint("KDNS: [INFO] Hostname is IP address, skipping DNS resolution\n");
+
+        NTSTATUS Status = ParseIpAddress(Hostname, HostnameLen, ResolvedIp);
+        if (!NT_SUCCESS(Status)) {
+            DbgPrint("KDNS: [Error] Failed to parse IP address: 0x%08X\n", Status);
+            return Status;
+        }
+
+        DbgPrint("KDNS: [SUCCESS] Resolved %s -> 0x%08X (IP address, no DNS query)\n",
+            Hostname, *ResolvedIp);
+
+        return STATUS_SUCCESS;
+    }
 
 #if KDNS_DEBUG_VERBOSE
     // Special debug for problematic hostnames
