@@ -6,10 +6,6 @@
  * Supports TLS/DTLS, DNS resolution with caching, chunked transfer encoding,
  * multipart/form-data uploads, and streaming file transfers.
  * 
- * @author 4l3x777
- * @date 2026
- * @version 1.0
- * 
  * @section features Features
  * - HTTP/1.1 and HTTPS (TLS 1.2/1.3) support
  * - DNS resolution with intelligent caching
