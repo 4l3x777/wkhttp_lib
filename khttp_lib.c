@@ -1711,13 +1711,16 @@ static NTSTATUS KhttpMultipartRequestChunked(
     PVOID ResponseBuffer = NULL;
 
     Status = KhttpParseUrl(Url, &Hostname, &Port, &Path, &IsHttps);
-    if (!NT_SUCCESS(Status)) {
-        goto Cleanup;
-    }
+    if (!NT_SUCCESS(Status)) goto Cleanup;
 
-    if (Config && Config->UseHttps) IsHttps = TRUE;
+    // URL scheme takes precedence - do NOT override http:// with Config->UseHttps
+    // If user explicitly wrote http://, they want plain TCP
+    // If user explicitly wrote https://, they want TLS
 
-    // Resolve hostname
+    DbgPrint("[KHTTP] %s %s (Host: %s:%u, HTTPS: %d)\n",
+        MethodNames[Method], Path, Hostname, Port, IsHttps);
+
+    // Resolve hostname to IP
     ULONG HostIp;
 
     ULONG DnsServer = DEFAULT_DNS_SERVER;
