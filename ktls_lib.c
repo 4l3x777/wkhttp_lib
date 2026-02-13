@@ -12,7 +12,7 @@
 #include "mbedtls/platform.h"
 
 // =============================================================
-// INTERNAL CONSTANTS & MACROS
+// CONSTANTS & MACROS
 // =============================================================
 
 #define DRIVER_TAG 'KTLS'
@@ -21,17 +21,59 @@
 
 #define HTONS(a) (((0xFF&(a))<<8) + ((0xFF00&(a))>>8))
 
+// Timeout Constants
+#define HANDSHAKE_TIMEOUT_MS 15000
+#define UDP_DEFAULT_TIMEOUT_MS 2000
+#define TCP_DEFAULT_TIMEOUT_MS 6000
+#define SSL_READ_TIMEOUT_MS 10000
+
+// Entropy & Crypto Constants
+#define ENTROPY_SOURCE_LENGTH 32
+#define PERSONALIZATION_STRING "KTLS"
+#define PERSONALIZATION_LENGTH 4
+
+// mbedTLS Error Codes
+#define MBEDTLS_X509_CERT_VERIFY_FAILED (-0x3b00)
+
+// Tick to Millisecond Conversion
+#define TICKS_TO_MS_DIVISOR 10000
+
 // =============================================================
-// INTERNAL STRUCTURES
+// LOGGING
 // =============================================================
 
-// Internal struct to hold timing state
+#if DBG
+#define KTLS_LOG_ERROR(fmt, ...) DbgPrint("KTLS [ERROR]: " fmt "\n", ##__VA_ARGS__)
+#define KTLS_LOG_WARN(fmt, ...)  DbgPrint("KTLS [WARN]:  " fmt "\n", ##__VA_ARGS__)
+#define KTLS_LOG_INFO(fmt, ...)  DbgPrint("KTLS [INFO]:  " fmt "\n", ##__VA_ARGS__)
+#define KTLS_LOG_DEBUG(fmt, ...) DbgPrint("KTLS [DEBUG]: " fmt "\n", ##__VA_ARGS__)
+#else
+#define KTLS_LOG_ERROR(fmt, ...)
+#define KTLS_LOG_WARN(fmt, ...)
+#define KTLS_LOG_INFO(fmt, ...)
+#define KTLS_LOG_DEBUG(fmt, ...)
+#endif
+
+// =============================================================
+// STRUCTURES
+// =============================================================
+
+// Protocol Configuration
+typedef struct _PROTOCOL_CONFIG {
+    ULONG DefaultTimeout;
+    BOOLEAN RequiresTdiConnection;
+    BOOLEAN SupportsTls;
+    const WCHAR* DeviceName;
+} PROTOCOL_CONFIG;
+
+// Timing Context
 typedef struct _KTLS_TIMING_CONTEXT {
     LARGE_INTEGER StartTick;
     ULONG DurationMs;
     BOOLEAN Active;
 } KTLS_TIMING_CONTEXT;
 
+// Session Structure
 typedef struct _KTLS_SESSION {
     // mbedTLS Contexts
     mbedtls_ssl_context ssl;
@@ -51,7 +93,7 @@ typedef struct _KTLS_SESSION {
     ULONG RemoteIp;
     USHORT RemotePort;
 
-    // NEW: Flag to indicate if TLS is active
+    // Flag to indicate if TLS is active
     BOOLEAN UseTls;
 
     // TDI Handles & Objects
@@ -67,19 +109,126 @@ typedef struct _KTLS_SESSION {
 } KTLS_SESSION;
 
 // =============================================================
-// MEMORY ALLOCATORS
+// PROTOCOL CONFIGURATION TABLE
+// =============================================================
+
+static const PROTOCOL_CONFIG g_ProtocolConfigs[] = {
+    [KTLS_PROTO_TCP]       = { TCP_DEFAULT_TIMEOUT_MS, TRUE,  TRUE,  TCP_DEVICE_NAME },
+    [KTLS_PROTO_UDP]       = { UDP_DEFAULT_TIMEOUT_MS, FALSE, TRUE,  UDP_DEVICE_NAME },
+    [KTLS_PROTO_TCP_PLAIN] = { TCP_DEFAULT_TIMEOUT_MS, TRUE,  FALSE, TCP_DEVICE_NAME }
+};
+
+// =============================================================
+// FORWARD DECLARATIONS
+// =============================================================
+
+static NTSTATUS ValidateSessionParams(ULONG Ip, USHORT Port, KTLS_PROTOCOL Protocol, PKTLS_SESSION* SessionOut);
+static NTSTATUS InitializeTlsContext(PKTLS_SESSION s, PCHAR Hostname);
+static NTSTATUS EstablishTransportConnection(PKTLS_SESSION s);
+static NTSTATUS PerformTlsHandshake(PKTLS_SESSION s);
+static ULONG GetElapsedMs(LARGE_INTEGER Start);
+static NTSTATUS SafeBufferCopy(PVOID Dest, SIZE_T DestSize, PVOID Src, SIZE_T SrcSize);
+
+// =============================================================
+// MEMORY MANAGEMENT
 // =============================================================
 
 static void* KernelCalloc(size_t n, size_t size) {
     size_t total = n * size;
-    if (n != 0 && total / n != size) return NULL;
+    
+    // Check for multiplication overflow
+    if (n != 0 && total / n != size) {
+        KTLS_LOG_ERROR("Calloc overflow: n=%zu, size=%zu", n, size);
+        return NULL;
+    }
+    
     void* p = ExAllocatePoolWithTag(NonPagedPool, total, DRIVER_TAG);
-    if (p) RtlZeroMemory(p, total);
+    if (p) {
+        RtlZeroMemory(p, total);
+    } else {
+        KTLS_LOG_ERROR("Failed to allocate %zu bytes", total);
+    }
+    
     return p;
 }
 
 static void KernelFree(void* ptr) {
-    if (ptr) ExFreePoolWithTag(ptr, DRIVER_TAG);
+    if (ptr) {
+        ExFreePoolWithTag(ptr, DRIVER_TAG);
+    }
+}
+
+// =============================================================
+// UTILITY FUNCTIONS
+// =============================================================
+
+static NTSTATUS ValidateSessionParams(
+    ULONG Ip,
+    USHORT Port,
+    KTLS_PROTOCOL Protocol,
+    PKTLS_SESSION* SessionOut
+) {
+    if (!SessionOut) {
+        KTLS_LOG_ERROR("SessionOut is NULL");
+        return STATUS_INVALID_PARAMETER;
+    }
+    
+    if (Ip == 0) {
+        KTLS_LOG_ERROR("Invalid IP address: 0");
+        return STATUS_INVALID_PARAMETER;
+    }
+    
+    if (Port == 0) {
+        KTLS_LOG_ERROR("Invalid port: 0");
+        return STATUS_INVALID_PARAMETER;
+    }
+    
+    if (Protocol >= 3) { // Max protocol value
+        KTLS_LOG_ERROR("Invalid protocol: %d", Protocol);
+        return STATUS_INVALID_PARAMETER;
+    }
+    
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS SafeBufferCopy(
+    PVOID Dest,
+    SIZE_T DestSize,
+    PVOID Src,
+    SIZE_T SrcSize
+) {
+    if (!Dest || !Src) {
+        KTLS_LOG_ERROR("SafeBufferCopy: NULL pointer");
+        return STATUS_INVALID_PARAMETER;
+    }
+    
+    if (SrcSize > DestSize) {
+        KTLS_LOG_ERROR("SafeBufferCopy: Buffer overflow (src=%zu, dest=%zu)", SrcSize, DestSize);
+        return STATUS_BUFFER_OVERFLOW;
+    }
+    
+    RtlCopyMemory(Dest, Src, SrcSize);
+    return STATUS_SUCCESS;
+}
+
+static ULONG GetElapsedMs(LARGE_INTEGER Start) {
+    LARGE_INTEGER Now;
+    ULONG Inc;
+    ULONGLONG Elapsed;
+    
+    KeQueryTickCount(&Now);
+    Inc = KeQueryTimeIncrement();
+    
+    // Calculate elapsed ticks
+    Elapsed = (ULONGLONG)(Now.QuadPart - Start.QuadPart);
+    
+    // Check for overflow: (Elapsed * Inc) / TICKS_TO_MS_DIVISOR
+    if (Elapsed > (ULONGLONG)ULONG_MAX * TICKS_TO_MS_DIVISOR / Inc) {
+        KTLS_LOG_WARN("Elapsed time overflow, returning max value");
+        return ULONG_MAX;
+    }
+    
+    return (ULONG)(Elapsed * Inc / TICKS_TO_MS_DIVISOR);
 }
 
 // =============================================================
@@ -96,9 +245,8 @@ static NTSTATUS TdiOpenAddress(PKTLS_SESSION s) {
     PFILE_FULL_EA_INFORMATION Ea = (PFILE_FULL_EA_INFORMATION)EaBuffer;
     PTA_IP_ADDRESS TaIp;
 
-    // Select TCP device for both TCP modes, UDP device for UDP
-    BOOLEAN IsTcp = (s->Protocol == KTLS_PROTO_TCP || s->Protocol == KTLS_PROTO_TCP_PLAIN);
-    RtlInitUnicodeString(&Name, IsTcp ? TCP_DEVICE_NAME : UDP_DEVICE_NAME);
+    const PROTOCOL_CONFIG* cfg = &g_ProtocolConfigs[s->Protocol];
+    RtlInitUnicodeString(&Name, cfg->DeviceName);
 
     InitializeObjectAttributes(&Attr, &Name, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
 
@@ -114,30 +262,44 @@ static NTSTATUS TdiOpenAddress(PKTLS_SESSION s) {
     TaIp->Address[0].Address[0].sin_port = 0;
     TaIp->Address[0].Address[0].in_addr = 0;
 
-    Status = ZwCreateFile(&s->AddressHandle, FILE_GENERIC_READ | FILE_GENERIC_WRITE, &Attr, &IoStatus,
-        NULL, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_OPEN, 0, Ea, sizeof(EaBuffer));
+    Status = ZwCreateFile(
+        &s->AddressHandle,
+        FILE_GENERIC_READ | FILE_GENERIC_WRITE,
+        &Attr,
+        &IoStatus,
+        NULL,
+        FILE_ATTRIBUTE_NORMAL,
+        FILE_SHARE_READ,
+        FILE_OPEN,
+        0,
+        Ea,
+        sizeof(EaBuffer)
+    );
 
     if (NT_SUCCESS(Status)) {
-        Status = ObReferenceObjectByHandle(s->AddressHandle, FILE_ANY_ACCESS, NULL, KernelMode,
-            (PVOID*)&s->AddressFileObj, NULL);
+        Status = ObReferenceObjectByHandle(
+            s->AddressHandle,
+            FILE_ANY_ACCESS,
+            NULL,
+            KernelMode,
+            (PVOID*)&s->AddressFileObj,
+            NULL
+        );
+        
         if (NT_SUCCESS(Status)) {
             s->DeviceObject = IoGetRelatedDeviceObject(s->AddressFileObj);
-            DbgPrint("KTLS: Address opened successfully (Device: %S)\n",
-                IsTcp ? L"TCP" : L"UDP");
-        }
-        else {
+            KTLS_LOG_INFO("Address opened successfully (Device: %S)", cfg->DeviceName);
+        } else {
+            KTLS_LOG_ERROR("ObReferenceObjectByHandle failed: 0x%x", Status);
             ZwClose(s->AddressHandle);
             s->AddressHandle = NULL;
         }
-    }
-    else {
-        DbgPrint("KTLS: ZwCreateFile failed for %S: 0x%x\n",
-            IsTcp ? L"TCP" : L"UDP", Status);
+    } else {
+        KTLS_LOG_ERROR("ZwCreateFile failed for %S: 0x%x", cfg->DeviceName, Status);
     }
 
     return Status;
 }
-
 
 static NTSTATUS TdiOpenConnection(PKTLS_SESSION s) {
     UNICODE_STRING Name;
@@ -157,12 +319,39 @@ static NTSTATUS TdiOpenConnection(PKTLS_SESSION s) {
     Ea->EaValueLength = sizeof(PVOID);
     *(PVOID*)(Ea->EaName + Ea->EaNameLength + 1) = NULL;
 
-    Status = ZwCreateFile(&s->ConnectionHandle, FILE_GENERIC_READ | FILE_GENERIC_WRITE, &Attr, &IoStatus,
-        NULL, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_OPEN, 0, Ea, sizeof(EaBuffer));
+    Status = ZwCreateFile(
+        &s->ConnectionHandle,
+        FILE_GENERIC_READ | FILE_GENERIC_WRITE,
+        &Attr,
+        &IoStatus,
+        NULL,
+        FILE_ATTRIBUTE_NORMAL,
+        FILE_SHARE_READ,
+        FILE_OPEN,
+        0,
+        Ea,
+        sizeof(EaBuffer)
+    );
 
     if (NT_SUCCESS(Status)) {
-        Status = ObReferenceObjectByHandle(s->ConnectionHandle, FILE_ANY_ACCESS, NULL, KernelMode, (PVOID*)&s->ConnFileObj, NULL);
+        Status = ObReferenceObjectByHandle(
+            s->ConnectionHandle,
+            FILE_ANY_ACCESS,
+            NULL,
+            KernelMode,
+            (PVOID*)&s->ConnFileObj,
+            NULL
+        );
+        
+        if (!NT_SUCCESS(Status)) {
+            KTLS_LOG_ERROR("ObReferenceObjectByHandle failed for connection: 0x%x", Status);
+            ZwClose(s->ConnectionHandle);
+            s->ConnectionHandle = NULL;
+        }
+    } else {
+        KTLS_LOG_ERROR("TdiOpenConnection failed: 0x%x", Status);
     }
+    
     return Status;
 }
 
@@ -170,17 +359,35 @@ static NTSTATUS TdiAssociate(PKTLS_SESSION s) {
     PIRP Irp;
     KEVENT Event;
     IO_STATUS_BLOCK IoStatus;
+    NTSTATUS Status;
+    
     KeInitializeEvent(&Event, NotificationEvent, FALSE);
-    Irp = TdiBuildInternalDeviceControlIrp(TDI_ASSOCIATE_ADDRESS, s->DeviceObject, s->ConnFileObj, &Event, &IoStatus);
-    if (!Irp) return STATUS_INSUFFICIENT_RESOURCES;
+    
+    Irp = TdiBuildInternalDeviceControlIrp(
+        TDI_ASSOCIATE_ADDRESS,
+        s->DeviceObject,
+        s->ConnFileObj,
+        &Event,
+        &IoStatus
+    );
+    
+    if (!Irp) {
+        KTLS_LOG_ERROR("TdiBuildInternalDeviceControlIrp failed for ASSOCIATE");
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
 
     TdiBuildAssociateAddress(Irp, s->DeviceObject, s->ConnFileObj, NULL, NULL, s->AddressHandle);
 
-    NTSTATUS Status = IoCallDriver(s->DeviceObject, Irp);
+    Status = IoCallDriver(s->DeviceObject, Irp);
     if (Status == STATUS_PENDING) {
         KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
         Status = IoStatus.Status;
     }
+    
+    if (!NT_SUCCESS(Status)) {
+        KTLS_LOG_ERROR("TdiAssociate failed: 0x%x", Status);
+    }
+    
     return Status;
 }
 
@@ -190,6 +397,7 @@ static NTSTATUS TdiConnect(PKTLS_SESSION s) {
     IO_STATUS_BLOCK IoStatus;
     TA_IP_ADDRESS RemoteAddr;
     TDI_CONNECTION_INFORMATION ConnInfo;
+    NTSTATUS Status;
 
     RemoteAddr.TAAddressCount = 1;
     RemoteAddr.Address[0].AddressLength = TDI_ADDRESS_LENGTH_IP;
@@ -202,16 +410,32 @@ static NTSTATUS TdiConnect(PKTLS_SESSION s) {
     ConnInfo.RemoteAddress = &RemoteAddr;
 
     KeInitializeEvent(&Event, NotificationEvent, FALSE);
-    Irp = TdiBuildInternalDeviceControlIrp(TDI_CONNECT, s->DeviceObject, s->ConnFileObj, &Event, &IoStatus);
-    if (!Irp) return STATUS_INSUFFICIENT_RESOURCES;
+    
+    Irp = TdiBuildInternalDeviceControlIrp(
+        TDI_CONNECT,
+        s->DeviceObject,
+        s->ConnFileObj,
+        &Event,
+        &IoStatus
+    );
+    
+    if (!Irp) {
+        KTLS_LOG_ERROR("TdiBuildInternalDeviceControlIrp failed for CONNECT");
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
 
     TdiBuildConnect(Irp, s->DeviceObject, s->ConnFileObj, NULL, NULL, NULL, &ConnInfo, NULL);
 
-    NTSTATUS Status = IoCallDriver(s->DeviceObject, Irp);
+    Status = IoCallDriver(s->DeviceObject, Irp);
     if (Status == STATUS_PENDING) {
         KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
         Status = IoStatus.Status;
     }
+    
+    if (!NT_SUCCESS(Status)) {
+        KTLS_LOG_ERROR("TdiConnect failed: 0x%x", Status);
+    }
+    
     return Status;
 }
 
@@ -223,44 +447,55 @@ static NTSTATUS TdiSendGeneric(PKTLS_SESSION s, PVOID Data, ULONG Len) {
     PVOID Buffer;
     NTSTATUS Status;
     PVOID ConnInfoToFree = NULL;
+    BOOLEAN IsTcp;
 
-    // 1. Allocate Buffer (NonPagedPool) - REQUIRED for MDL
+    // Allocate NonPagedPool buffer (required for MDL)
     Buffer = ExAllocatePoolWithTag(NonPagedPool, Len, DRIVER_TAG);
-    if (!Buffer) return STATUS_INSUFFICIENT_RESOURCES;
+    if (!Buffer) {
+        KTLS_LOG_ERROR("Failed to allocate send buffer (%u bytes)", Len);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    
     RtlCopyMemory(Buffer, Data, Len);
 
     KeInitializeEvent(&Event, NotificationEvent, FALSE);
 
-    // 2. Build IRP
-    UCHAR MajorFunction = (s->Protocol == KTLS_PROTO_TCP || s->Protocol == KTLS_PROTO_TCP_PLAIN)
-        ? TDI_SEND : TDI_SEND_DATAGRAM;
+    IsTcp = (s->Protocol == KTLS_PROTO_TCP || s->Protocol == KTLS_PROTO_TCP_PLAIN);
+    UCHAR MajorFunction = IsTcp ? TDI_SEND : TDI_SEND_DATAGRAM;
 
-    Irp = TdiBuildInternalDeviceControlIrp(MajorFunction, s->DeviceObject, s->ActiveFileObj, &Event, &IoStatus);
+    Irp = TdiBuildInternalDeviceControlIrp(
+        MajorFunction,
+        s->DeviceObject,
+        s->ActiveFileObj,
+        &Event,
+        &IoStatus
+    );
+    
     if (!Irp) {
+        KTLS_LOG_ERROR("TdiBuildInternalDeviceControlIrp failed for SEND");
         ExFreePoolWithTag(Buffer, DRIVER_TAG);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    // 3. Allocate MDL
     Mdl = IoAllocateMdl(Buffer, Len, FALSE, FALSE, NULL);
     if (!Mdl) {
+        KTLS_LOG_ERROR("IoAllocateMdl failed");
         IoFreeIrp(Irp);
         ExFreePoolWithTag(Buffer, DRIVER_TAG);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
     MmBuildMdlForNonPagedPool(Mdl);
 
-    // 4. Setup Transport parameters
-    if (s->Protocol == KTLS_PROTO_TCP || s->Protocol == KTLS_PROTO_TCP_PLAIN) {
-        // TCP: Use TdiBuildSend with proper flags [web:112]
+    if (IsTcp) {
         TdiBuildSend(Irp, s->DeviceObject, s->ActiveFileObj, NULL, NULL, Mdl, 0, Len);
-    }
-    else {
+    } else {
         // UDP: Allocate Connection Information
+        SIZE_T ConnInfoSize = sizeof(TDI_CONNECTION_INFORMATION) + sizeof(TA_IP_ADDRESS);
         PTDI_CONNECTION_INFORMATION ConnInfo = (PTDI_CONNECTION_INFORMATION)
-            ExAllocatePoolWithTag(NonPagedPool, sizeof(TDI_CONNECTION_INFORMATION) + sizeof(TA_IP_ADDRESS), DRIVER_TAG);
+            ExAllocatePoolWithTag(NonPagedPool, ConnInfoSize, DRIVER_TAG);
 
         if (!ConnInfo) {
+            KTLS_LOG_ERROR("Failed to allocate connection info");
             IoFreeMdl(Mdl);
             IoFreeIrp(Irp);
             ExFreePoolWithTag(Buffer, DRIVER_TAG);
@@ -282,7 +517,6 @@ static NTSTATUS TdiSendGeneric(PKTLS_SESSION s, PVOID Data, ULONG Len) {
         TdiBuildSendDatagram(Irp, s->DeviceObject, s->ActiveFileObj, NULL, NULL, Mdl, Len, ConnInfo);
     }
 
-    // 5. Call Driver
     Status = IoCallDriver(s->DeviceObject, Irp);
 
     if (Status == STATUS_PENDING) {
@@ -290,12 +524,15 @@ static NTSTATUS TdiSendGeneric(PKTLS_SESSION s, PVOID Data, ULONG Len) {
         Status = IoStatus.Status;
     }
 
-    // 6. Cleanup
+    // Cleanup
     if (ConnInfoToFree) {
         ExFreePoolWithTag(ConnInfoToFree, DRIVER_TAG);
     }
-
     ExFreePoolWithTag(Buffer, DRIVER_TAG);
+
+    if (!NT_SUCCESS(Status)) {
+        KTLS_LOG_ERROR("TdiSendGeneric failed: 0x%x", Status);
+    }
 
     return Status;
 }
@@ -307,26 +544,37 @@ static NTSTATUS TdiRecvGeneric(PKTLS_SESSION s, PVOID Buffer, ULONG Len, PULONG 
     IO_STATUS_BLOCK IoStatus;
     NTSTATUS Status;
     LARGE_INTEGER TimeValue;
+    BOOLEAN IsTcp;
 
     KeInitializeEvent(&Event, NotificationEvent, FALSE);
 
-    UCHAR Major = (s->Protocol == KTLS_PROTO_TCP || s->Protocol == KTLS_PROTO_TCP_PLAIN)
-        ? TDI_RECEIVE : TDI_RECEIVE_DATAGRAM;
+    IsTcp = (s->Protocol == KTLS_PROTO_TCP || s->Protocol == KTLS_PROTO_TCP_PLAIN);
+    UCHAR Major = IsTcp ? TDI_RECEIVE : TDI_RECEIVE_DATAGRAM;
 
-    Irp = TdiBuildInternalDeviceControlIrp(Major, s->DeviceObject, s->ActiveFileObj, &Event, &IoStatus);
-    if (!Irp) return STATUS_INSUFFICIENT_RESOURCES;
+    Irp = TdiBuildInternalDeviceControlIrp(
+        Major,
+        s->DeviceObject,
+        s->ActiveFileObj,
+        &Event,
+        &IoStatus
+    );
+    
+    if (!Irp) {
+        KTLS_LOG_ERROR("TdiBuildInternalDeviceControlIrp failed for RECEIVE");
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
 
     Mdl = IoAllocateMdl(Buffer, Len, FALSE, FALSE, NULL);
     if (!Mdl) {
+        KTLS_LOG_ERROR("IoAllocateMdl failed for receive");
         IoFreeIrp(Irp);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
     MmBuildMdlForNonPagedPool(Mdl);
 
-    if (s->Protocol == KTLS_PROTO_TCP || s->Protocol == KTLS_PROTO_TCP_PLAIN) {
+    if (IsTcp) {
         TdiBuildReceive(Irp, s->DeviceObject, s->ActiveFileObj, NULL, NULL, Mdl, TDI_RECEIVE_NORMAL, Len);
-    }
-    else {
+    } else {
         TdiBuildReceiveDatagram(Irp, s->DeviceObject, s->ActiveFileObj, NULL, NULL, Mdl, Len, NULL, NULL, NULL);
     }
 
@@ -336,9 +584,9 @@ static NTSTATUS TdiRecvGeneric(PKTLS_SESSION s, PVOID Buffer, ULONG Len, PULONG 
         if (s->TimeoutMs == 0) {
             KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
             Status = IoStatus.Status;
-        }
-        else {
-            TimeValue.QuadPart = -(LONGLONG)s->TimeoutMs * 10000;
+        } else {
+            // Convert milliseconds to 100-nanosecond intervals (negative for relative time)
+            TimeValue.QuadPart = -(LONGLONG)s->TimeoutMs * 10000LL;
 
             Status = KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, &TimeValue);
 
@@ -346,15 +594,20 @@ static NTSTATUS TdiRecvGeneric(PKTLS_SESSION s, PVOID Buffer, ULONG Len, PULONG 
                 IoCancelIrp(Irp);
                 KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
                 Status = STATUS_IO_TIMEOUT;
-            }
-            else {
+            } else {
                 Status = IoStatus.Status;
             }
         }
     }
 
-    if (NT_SUCCESS(Status)) *Received = (ULONG)IoStatus.Information;
-    else *Received = 0;
+    if (NT_SUCCESS(Status)) {
+        *Received = (ULONG)IoStatus.Information;
+    } else {
+        *Received = 0;
+        if (Status != STATUS_IO_TIMEOUT) {
+            KTLS_LOG_ERROR("TdiRecvGeneric failed: 0x%x", Status);
+        }
+    }
 
     return Status;
 }
@@ -364,34 +617,36 @@ static NTSTATUS TdiRecvGeneric(PKTLS_SESSION s, PVOID Buffer, ULONG Len, PULONG 
 // =============================================================
 
 static int KernelEntropy(void* data, unsigned char* output, size_t len, size_t* olen) {
-    LARGE_INTEGER pc, st;
+    LARGE_INTEGER pc, st, it;
+    ULONG proc_id;
+    
+    UNREFERENCED_PARAMETER(data);
+    
     KeQueryPerformanceCounter(&pc);
     KeQuerySystemTime(&st);
+    KeQueryInterruptTime(&it);
+    proc_id = (ULONG)(ULONG_PTR)PsGetCurrentProcessId();
+    
     for (size_t i = 0; i < len; i++) {
-        output[i] = (unsigned char)(pc.QuadPart ^ st.QuadPart ^ (ULONG_PTR)PsGetCurrentProcessId());
+        // Mix multiple entropy sources with bit rotation
+        output[i] = (unsigned char)(
+            (pc.QuadPart >> ((i * 7) % 64)) ^
+            (st.QuadPart >> ((i * 11) % 64)) ^
+            (it.QuadPart >> ((i * 13) % 64)) ^
+            (proc_id << (i % 8))
+        );
+        
+        // Rotate sources for next iteration
         pc.QuadPart = _rotl64(pc.QuadPart, 1);
+        st.QuadPart = _rotl64(st.QuadPart, 1);
     }
+    
     *olen = len;
     return 0;
 }
 
-// ---------------------------------------------------------
-// Timing Implementations
-// ---------------------------------------------------------
+// Timing Callbacks for mbedTLS DTLS
 
-static ULONG GetElapsedMs(LARGE_INTEGER Start) {
-    LARGE_INTEGER Now, Freq;
-    KeQueryTickCount(&Now);
-    // Ticks -> Ms. (Tick * 1000 * Inc) / 10000000
-    // Simplified: KeQueryTickCount gives ticks. KeQueryTimeIncrement gives 100ns units per tick.
-    // Ms = (Now - Start) * Inc / 10000
-    ULONG Inc = KeQueryTimeIncrement();
-    return (ULONG)((Now.QuadPart - Start.QuadPart) * Inc / 10000);
-}
-
-// Callback: Set Delay
-// int_ms: Intermediate delay (milliseconds)
-// fin_ms: Final delay (milliseconds)
 void KernelTimingSetDelay(void* data, uint32_t int_ms, uint32_t fin_ms) {
     PKTLS_SESSION s = (PKTLS_SESSION)data;
 
@@ -405,13 +660,11 @@ void KernelTimingSetDelay(void* data, uint32_t int_ms, uint32_t fin_ms) {
     s->TimerInt.DurationMs = int_ms;
     s->TimerInt.Active = TRUE;
 
-    s->TimerFin.StartTick = s->TimerInt.StartTick; // Same start
+    s->TimerFin.StartTick = s->TimerInt.StartTick;
     s->TimerFin.DurationMs = fin_ms;
     s->TimerFin.Active = TRUE;
 }
 
-// Callback: Get Delay Status
-// Returns: -1 (cancelled), 0 (none), 1 (intermediate), 2 (final)
 int KernelTimingGetDelay(void* data) {
     PKTLS_SESSION s = (PKTLS_SESSION)data;
 
@@ -432,7 +685,13 @@ int KernelTimingGetDelay(void* data) {
 static int KernelNetSend(void* ctx, const unsigned char* buf, size_t len) {
     PKTLS_SESSION s = (PKTLS_SESSION)ctx;
     NTSTATUS status = TdiSendGeneric(s, (PVOID)buf, (ULONG)len);
-    return NT_SUCCESS(status) ? (int)len : MBEDTLS_ERR_SSL_INTERNAL_ERROR;
+    
+    if (!NT_SUCCESS(status)) {
+        KTLS_LOG_ERROR("KernelNetSend failed: 0x%x", status);
+        return MBEDTLS_ERR_SSL_INTERNAL_ERROR;
+    }
+    
+    return (int)len;
 }
 
 static int KernelNetRecv(void* ctx, unsigned char* buf, size_t len) {
@@ -445,29 +704,21 @@ static int KernelNetRecv(void* ctx, unsigned char* buf, size_t len) {
         return MBEDTLS_ERR_SSL_WANT_READ;
     }
 
-    if (!NT_SUCCESS(status)) return MBEDTLS_ERR_SSL_INTERNAL_ERROR;
-    if ((s->Protocol == KTLS_PROTO_TCP || s->Protocol == KTLS_PROTO_TCP_PLAIN) && received == 0)
+    if (!NT_SUCCESS(status)) {
+        KTLS_LOG_ERROR("KernelNetRecv failed: 0x%x", status);
+        return MBEDTLS_ERR_SSL_INTERNAL_ERROR;
+    }
+    
+    if ((s->Protocol == KTLS_PROTO_TCP || s->Protocol == KTLS_PROTO_TCP_PLAIN) && received == 0) {
         return MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY;
+    }
 
     return (int)received;
 }
 
 // =============================================================
-// PUBLIC API IMPLEMENTATION
+// TLS INITIALIZATION & HANDSHAKE
 // =============================================================
-
-VOID KtlsSetTimeout(PKTLS_SESSION Session, ULONG TimeoutMs) {
-    if (Session) {
-        Session->TimeoutMs = TimeoutMs;
-    }
-}
-
-NTSTATUS KtlsGlobalInit(void) {
-    mbedtls_platform_set_calloc_free(KernelCalloc, KernelFree);
-    return STATUS_SUCCESS;
-}
-
-VOID KtlsGlobalCleanup(void) { }
 
 static int KernelVerifyCallback(void* data, mbedtls_x509_crt* crt, int depth, uint32_t* flags) {
     UNREFERENCED_PARAMETER(data);
@@ -477,164 +728,289 @@ static int KernelVerifyCallback(void* data, mbedtls_x509_crt* crt, int depth, ui
     // Clear all verification flags (accept any certificate)
     *flags = 0;
 
-    return 0;  // Success
+    return 0;
 }
 
-NTSTATUS KtlsConnect(ULONG Ip, USHORT Port, KTLS_PROTOCOL Protocol, PCHAR Hostname, PKTLS_SESSION* SessionOut) {
+static NTSTATUS InitializeTlsContext(PKTLS_SESSION s, PCHAR Hostname) {
+    int ret;
+    int transport;
+    
+    // Initialize mbedTLS contexts
+    mbedtls_ssl_init(&s->ssl);
+    mbedtls_ssl_config_init(&s->conf);
+    mbedtls_ctr_drbg_init(&s->ctr_drbg);
+    mbedtls_entropy_init(&s->entropy);
+
+    // Add entropy source
+    mbedtls_entropy_add_source(
+        &s->entropy,
+        KernelEntropy,
+        NULL,
+        ENTROPY_SOURCE_LENGTH,
+        MBEDTLS_ENTROPY_SOURCE_STRONG
+    );
+    
+    // Seed DRBG
+    ret = mbedtls_ctr_drbg_seed(
+        &s->ctr_drbg,
+        mbedtls_entropy_func,
+        &s->entropy,
+        (const unsigned char*)PERSONALIZATION_STRING,
+        PERSONALIZATION_LENGTH
+    );
+    
+    if (ret != 0) {
+        KTLS_LOG_ERROR("mbedtls_ctr_drbg_seed failed: -0x%x", -ret);
+        return STATUS_UNSUCCESSFUL;
+    }
+
+    // Configure SSL/TLS
+    transport = (s->Protocol == KTLS_PROTO_UDP) ? 
+                MBEDTLS_SSL_TRANSPORT_DATAGRAM : 
+                MBEDTLS_SSL_TRANSPORT_STREAM;
+
+    ret = mbedtls_ssl_config_defaults(
+        &s->conf,
+        MBEDTLS_SSL_IS_CLIENT,
+        transport,
+        MBEDTLS_SSL_PRESET_DEFAULT
+    );
+    
+    if (ret != 0) {
+        KTLS_LOG_ERROR("mbedtls_ssl_config_defaults failed: -0x%x", -ret);
+        return STATUS_UNSUCCESSFUL;
+    }
+
+    // Disable certificate verification
+    mbedtls_ssl_conf_authmode(&s->conf, MBEDTLS_SSL_VERIFY_NONE);
+    mbedtls_ssl_conf_verify(&s->conf, KernelVerifyCallback, NULL);
+
+    // Set RNG
+    mbedtls_ssl_conf_rng(&s->conf, mbedtls_ctr_drbg_random, &s->ctr_drbg);
+
+    // Configure ALPN for HTTP/1.1
+    static const char* alpn_protocols[] = { "http/1.1", NULL };
+    ret = mbedtls_ssl_conf_alpn_protocols(&s->conf, alpn_protocols);
+    if (ret != 0) {
+        KTLS_LOG_WARN("Failed to set ALPN protocols: -0x%x", -ret);
+    }
+
+    // Disable session tickets and renegotiation
+    mbedtls_ssl_conf_session_tickets(&s->conf, MBEDTLS_SSL_SESSION_TICKETS_DISABLED);
+    mbedtls_ssl_conf_renegotiation(&s->conf, MBEDTLS_SSL_RENEGOTIATION_DISABLED);
+
+    // DTLS-specific configuration
+    if (s->Protocol == KTLS_PROTO_UDP) {
+        mbedtls_ssl_set_timer_cb(&s->ssl, s, KernelTimingSetDelay, KernelTimingGetDelay);
+        mbedtls_ssl_conf_read_timeout(&s->conf, SSL_READ_TIMEOUT_MS);
+    }
+
+    // Setup SSL context
+    ret = mbedtls_ssl_setup(&s->ssl, &s->conf);
+    if (ret != 0) {
+        KTLS_LOG_ERROR("mbedtls_ssl_setup failed: -0x%x", -ret);
+        return STATUS_UNSUCCESSFUL;
+    }
+
+    // Set SNI hostname if provided
+    if (Hostname && Hostname[0] != '\0') {
+        ret = mbedtls_ssl_set_hostname(&s->ssl, Hostname);
+        if (ret != 0) {
+            KTLS_LOG_WARN("Failed to set SNI hostname: -0x%x", -ret);
+        } else {
+            KTLS_LOG_INFO("SNI hostname set to: %s", Hostname);
+        }
+    }
+
+    // Set BIO callbacks
+    mbedtls_ssl_set_bio(
+        &s->ssl,
+        s,
+        KernelNetSend,
+        KernelNetRecv,
+        (s->Protocol == KTLS_PROTO_UDP) ? KernelNetRecv : NULL
+    );
+
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS EstablishTransportConnection(PKTLS_SESSION s) {
     NTSTATUS Status;
-    PKTLS_SESSION s;
+    const PROTOCOL_CONFIG* cfg = &g_ProtocolConfigs[s->Protocol];
+
+    // Open TDI address
+    Status = TdiOpenAddress(s);
+    if (!NT_SUCCESS(Status)) {
+        KTLS_LOG_ERROR("TdiOpenAddress failed: 0x%x", Status);
+        return Status;
+    }
+
+    // UDP doesn't require connection establishment
+    if (!cfg->RequiresTdiConnection) {
+        s->ActiveFileObj = s->AddressFileObj;
+        return STATUS_SUCCESS;
+    }
+
+    // TCP: Open connection, associate, and connect
+    Status = TdiOpenConnection(s);
+    if (!NT_SUCCESS(Status)) {
+        KTLS_LOG_ERROR("TdiOpenConnection failed: 0x%x", Status);
+        return Status;
+    }
+
+    Status = TdiAssociate(s);
+    if (!NT_SUCCESS(Status)) {
+        KTLS_LOG_ERROR("TdiAssociate failed: 0x%x", Status);
+        return Status;
+    }
+
+    Status = TdiConnect(s);
+    if (!NT_SUCCESS(Status)) {
+        KTLS_LOG_ERROR("TdiConnect failed: 0x%x", Status);
+        return Status;
+    }
+
+    s->ActiveFileObj = s->ConnFileObj;
+    
+    KTLS_LOG_INFO("Transport connection established successfully");
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS PerformTlsHandshake(PKTLS_SESSION s) {
+    LARGE_INTEGER StartTime, Now;
+    ULONG Inc;
     int ret;
 
+    KeQueryTickCount(&StartTime);
+    Inc = KeQueryTimeIncrement();
+
+    KTLS_LOG_INFO("Starting TLS handshake...");
+
+    do {
+        ret = mbedtls_ssl_handshake(&s->ssl);
+
+        // Check for global timeout
+        KeQueryTickCount(&Now);
+        ULONG Elapsed = (ULONG)((Now.QuadPart - StartTime.QuadPart) * Inc / TICKS_TO_MS_DIVISOR);
+        
+        if (Elapsed > HANDSHAKE_TIMEOUT_MS) {
+            KTLS_LOG_ERROR("Handshake global timeout (%u ms)", HANDSHAKE_TIMEOUT_MS);
+            return STATUS_IO_TIMEOUT;
+        }
+
+    } while (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE);
+
+    // Handle certificate verification errors
+    if (ret == MBEDTLS_X509_CERT_VERIFY_FAILED) {
+        uint32_t verify_flags = mbedtls_ssl_get_verify_result(&s->ssl);
+
+        if (verify_flags == 0) {
+            // Our callback cleared flags but mbedTLS internal check failed
+            KTLS_LOG_WARN("Cert internal check failed but verification disabled - accepting");
+            ret = 0;
+        } else {
+            KTLS_LOG_ERROR("Certificate verification failed (flags: 0x%x)", verify_flags);
+            return STATUS_CONNECTION_REFUSED;
+        }
+    }
+
+    if (ret != 0) {
+        KTLS_LOG_ERROR("Handshake failed: -0x%x", -ret);
+        return STATUS_CONNECTION_REFUSED;
+    }
+
+    KTLS_LOG_INFO("TLS handshake successful");
+
+    // Log ALPN protocol
+    const char* alpn_selected = mbedtls_ssl_get_alpn_protocol(&s->ssl);
+    if (alpn_selected) {
+        KTLS_LOG_INFO("ALPN protocol: %s", alpn_selected);
+    }
+
+    return STATUS_SUCCESS;
+}
+
+// =============================================================
+// PUBLIC API IMPLEMENTATION
+// =============================================================
+
+VOID KtlsSetTimeout(PKTLS_SESSION Session, ULONG TimeoutMs) {
+    if (Session) {
+        Session->TimeoutMs = TimeoutMs;
+        KTLS_LOG_DEBUG("Timeout set to %u ms", TimeoutMs);
+    }
+}
+
+NTSTATUS KtlsGlobalInit(void) {
+    mbedtls_platform_set_calloc_free(KernelCalloc, KernelFree);
+    KTLS_LOG_INFO("KTLS library initialized");
+    return STATUS_SUCCESS;
+}
+
+VOID KtlsGlobalCleanup(void) {
+    KTLS_LOG_INFO("KTLS library cleanup");
+}
+
+NTSTATUS KtlsConnect(
+    ULONG Ip,
+    USHORT Port,
+    KTLS_PROTOCOL Protocol,
+    PCHAR Hostname,
+    PKTLS_SESSION* SessionOut
+) {
+    NTSTATUS Status;
+    PKTLS_SESSION s;
+
+    // Validate parameters
+    Status = ValidateSessionParams(Ip, Port, Protocol, SessionOut);
+    if (!NT_SUCCESS(Status)) {
+        return Status;
+    }
+
+    // Allocate session
     s = (PKTLS_SESSION)ExAllocatePoolWithTag(NonPagedPool, sizeof(KTLS_SESSION), DRIVER_TAG);
-    if (!s) return STATUS_INSUFFICIENT_RESOURCES;
+    if (!s) {
+        KTLS_LOG_ERROR("Failed to allocate session structure");
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    
     RtlZeroMemory(s, sizeof(KTLS_SESSION));
 
+    // Initialize session parameters
     s->Protocol = Protocol;
     s->RemoteIp = Ip;
     s->RemotePort = Port;
-    s->UseTls = (Protocol != KTLS_PROTO_TCP_PLAIN);
-    s->TimeoutMs = (Protocol == KTLS_PROTO_UDP) ? 2000 : 6000;
+    s->UseTls = g_ProtocolConfigs[Protocol].SupportsTls;
+    s->TimeoutMs = g_ProtocolConfigs[Protocol].DefaultTimeout;
 
-    // 1. Init mbedTLS (only if using TLS)
+    KTLS_LOG_INFO("Connecting to %u.%u.%u.%u:%u (Protocol: %d, TLS: %d)",
+        (Ip >> 0) & 0xFF, (Ip >> 8) & 0xFF, (Ip >> 16) & 0xFF, (Ip >> 24) & 0xFF,
+        Port, Protocol, s->UseTls);
+
+    // Initialize TLS context (only if using TLS)
     if (s->UseTls) {
-        mbedtls_ssl_init(&s->ssl);
-        mbedtls_ssl_config_init(&s->conf);
-        mbedtls_ctr_drbg_init(&s->ctr_drbg);
-        mbedtls_entropy_init(&s->entropy);
-
-        mbedtls_entropy_add_source(&s->entropy, KernelEntropy, NULL, 32, MBEDTLS_ENTROPY_SOURCE_STRONG);
-        if (mbedtls_ctr_drbg_seed(&s->ctr_drbg, mbedtls_entropy_func, &s->entropy, "KTLS", 4) != 0) {
-            Status = STATUS_UNSUCCESSFUL;
+        Status = InitializeTlsContext(s, Hostname);
+        if (!NT_SUCCESS(Status)) {
             goto cleanup;
         }
-
-        int transport = (Protocol == KTLS_PROTO_UDP) ? MBEDTLS_SSL_TRANSPORT_DATAGRAM : MBEDTLS_SSL_TRANSPORT_STREAM;
-
-        if (mbedtls_ssl_config_defaults(&s->conf, MBEDTLS_SSL_IS_CLIENT, transport,
-            MBEDTLS_SSL_PRESET_DEFAULT) != 0) {
-            Status = STATUS_UNSUCCESSFUL;
-            goto cleanup;
-        }
-
-        // Completely disable certificate verification
-        mbedtls_ssl_conf_authmode(&s->conf, MBEDTLS_SSL_VERIFY_NONE);
-
-        // Add custom verify callback that accepts everything
-        mbedtls_ssl_conf_verify(&s->conf, KernelVerifyCallback, NULL);
-
-        // Set RNG
-        mbedtls_ssl_conf_rng(&s->conf, mbedtls_ctr_drbg_random, &s->ctr_drbg);
-
-        // Add ALPN support for HTTP/1.1 (required by Google and modern HTTPS servers)
-        static const char* alpn_protocols[] = { "http/1.1", NULL };
-        if (mbedtls_ssl_conf_alpn_protocols(&s->conf, alpn_protocols) != 0) {
-            DbgPrint("KTLS: Failed to set ALPN protocols\n");
-        }
-
-        // Disable session tickets (helps with some strict servers)
-        mbedtls_ssl_conf_session_tickets(&s->conf, MBEDTLS_SSL_SESSION_TICKETS_DISABLED);
-
-        // Disable renegotiation
-        mbedtls_ssl_conf_renegotiation(&s->conf, MBEDTLS_SSL_RENEGOTIATION_DISABLED);
-
-        if (Protocol == KTLS_PROTO_UDP) {
-            mbedtls_ssl_set_timer_cb(&s->ssl, s, KernelTimingSetDelay, KernelTimingGetDelay);
-            mbedtls_ssl_conf_read_timeout(&s->conf, 10000);
-        }
-
-        if (mbedtls_ssl_setup(&s->ssl, &s->conf) != 0) {
-            Status = STATUS_UNSUCCESSFUL;
-            goto cleanup;
-        }
-
-        // Set SNI hostname if provided
-        if (Hostname && Hostname[0] != '\0') {
-            if (mbedtls_ssl_set_hostname(&s->ssl, Hostname) != 0) {
-                DbgPrint("KTLS: Failed to set SNI hostname\n");
-            }
-            else {
-                DbgPrint("KTLS: SNI hostname set to: %s\n", Hostname);
-            }
-        }
-
-        mbedtls_ssl_set_bio(&s->ssl, s, KernelNetSend, KernelNetRecv,
-            (Protocol == KTLS_PROTO_UDP) ? KernelNetRecv : NULL);
     }
 
-    // 2. Init TDI
-    Status = TdiOpenAddress(s);
-    if (!NT_SUCCESS(Status)) goto cleanup;
-
-    if (Protocol == KTLS_PROTO_UDP) {
-        s->ActiveFileObj = s->AddressFileObj;
-    }
-    else {
-        Status = TdiOpenConnection(s);
-        if (!NT_SUCCESS(Status)) goto cleanup;
-
-        Status = TdiAssociate(s);
-        if (!NT_SUCCESS(Status)) goto cleanup;
-
-        Status = TdiConnect(s);
-        if (!NT_SUCCESS(Status)) goto cleanup;
-
-        s->ActiveFileObj = s->ConnFileObj;
+    // Establish transport connection
+    Status = EstablishTransportConnection(s);
+    if (!NT_SUCCESS(Status)) {
+        goto cleanup;
     }
 
-    // 3. Handshake (only if using TLS)
+    // Perform TLS handshake (only if using TLS)
     if (s->UseTls) {
-        LARGE_INTEGER StartTime, Now;
-        KeQueryTickCount(&StartTime);
-        ULONG MaxHandshakeTimeMs = 15000;
-        ULONG Inc = KeQueryTimeIncrement();
-
-        do {
-            ret = mbedtls_ssl_handshake(&s->ssl);
-
-            KeQueryTickCount(&Now);
-            ULONG Elapsed = (ULONG)((Now.QuadPart - StartTime.QuadPart) * Inc / 10000);
-            if (Elapsed > MaxHandshakeTimeMs) {
-                DbgPrint("KTLS: Handshake Global Timeout!\n");
-                ret = MBEDTLS_ERR_SSL_TIMEOUT;
-                break;
-            }
-
-        } while (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE);
-
-        // Special handling for certificate errors when VERIFY_NONE is set
-        if (ret == -0x3b00) {  // MBEDTLS_ERR_X509_CERT_VERIFY_FAILED
-            uint32_t verify_flags = mbedtls_ssl_get_verify_result(&s->ssl);
-
-            if (verify_flags == 0) {
-                // Our callback cleared all flags, but mbedTLS internal check still failed
-                // This happens with some servers (like Google) that have complex cert chains
-                // Since we explicitly disabled verification, treat this as success
-                DbgPrint("KTLS: Cert internal check failed but verification disabled - accepting\n");
-                ret = 0;  // Override error
-            }
-            else {
-                // Genuine verification failure with non-zero flags
-                DbgPrint("KTLS: Certificate verification failed\n");
-                DbgPrint("KTLS: Verify flags: 0x%x\n", verify_flags);
-            }
-        }
-
-        if (ret != 0) {
-            DbgPrint("KTLS: Handshake failed -0x%x\n", -ret);
-            Status = STATUS_CONNECTION_REFUSED;
+        Status = PerformTlsHandshake(s);
+        if (!NT_SUCCESS(Status)) {
             goto cleanup;
-        }
-
-        DbgPrint("KTLS: Handshake successful\n");
-
-        // Log negotiated ALPN protocol (for debugging)
-        const char* alpn_selected = mbedtls_ssl_get_alpn_protocol(&s->ssl);
-        if (alpn_selected) {
-            DbgPrint("KTLS: ALPN protocol: %s\n", alpn_selected);
         }
     }
 
     *SessionOut = s;
+    KTLS_LOG_INFO("Connection established successfully");
     return STATUS_SUCCESS;
 
 cleanup:
@@ -643,6 +1019,11 @@ cleanup:
 }
 
 NTSTATUS KtlsSend(PKTLS_SESSION Session, PVOID Data, ULONG Length, PULONG BytesSent) {
+    if (!Session || !Data || !BytesSent) {
+        KTLS_LOG_ERROR("Invalid parameters in KtlsSend");
+        return STATUS_INVALID_PARAMETER;
+    }
+
     if (!Session->UseTls) {
         // Plain TCP - send directly
         NTSTATUS Status = TdiSendGeneric(Session, Data, Length);
@@ -660,11 +1041,18 @@ NTSTATUS KtlsSend(PKTLS_SESSION Session, PVOID Data, ULONG Length, PULONG BytesS
         *BytesSent = (ULONG)ret;
         return STATUS_SUCCESS;
     }
+    
     *BytesSent = 0;
+    KTLS_LOG_ERROR("mbedtls_ssl_write failed: -0x%x", -ret);
     return STATUS_UNSUCCESSFUL;
 }
 
 NTSTATUS KtlsRecv(PKTLS_SESSION Session, PVOID Buffer, ULONG BufferSize, PULONG BytesReceived) {
+    if (!Session || !Buffer || !BytesReceived) {
+        KTLS_LOG_ERROR("Invalid parameters in KtlsRecv");
+        return STATUS_INVALID_PARAMETER;
+    }
+
     if (!Session->UseTls) {
         // Plain TCP - receive directly
         NTSTATUS Status = TdiRecvGeneric(Session, Buffer, BufferSize, BytesReceived);
@@ -696,27 +1084,33 @@ NTSTATUS KtlsRecv(PKTLS_SESSION Session, PVOID Buffer, ULONG BufferSize, PULONG 
 
     *BytesReceived = 0;
 
-    if (ret == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY || ret == 0)
+    if (ret == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY || ret == 0) {
         return STATUS_END_OF_FILE;
+    }
 
     if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
         return STATUS_IO_TIMEOUT;
     }
 
-    if (ret == MBEDTLS_ERR_SSL_TIMEOUT)
+    if (ret == MBEDTLS_ERR_SSL_TIMEOUT) {
         return STATUS_IO_TIMEOUT;
+    }
 
+    KTLS_LOG_ERROR("mbedtls_ssl_read failed: -0x%x", -ret);
     return STATUS_UNSUCCESSFUL;
 }
 
 VOID KtlsClose(PKTLS_SESSION s) {
     if (!s) return;
 
+    KTLS_LOG_INFO("Closing session");
+
+    // Close TLS connection gracefully
     if (s->UseTls && s->ssl.state == MBEDTLS_SSL_HANDSHAKE_OVER) {
         mbedtls_ssl_close_notify(&s->ssl);
     }
 
-    // Clean mbedTLS (only if it was initialized)
+    // Clean mbedTLS contexts (only if initialized)
     if (s->UseTls) {
         mbedtls_ssl_free(&s->ssl);
         mbedtls_ssl_config_free(&s->conf);
@@ -724,11 +1118,21 @@ VOID KtlsClose(PKTLS_SESSION s) {
         mbedtls_entropy_free(&s->entropy);
     }
 
-    // Clean TDI
-    if (s->ConnFileObj) ObDereferenceObject(s->ConnFileObj);
-    if (s->ConnectionHandle) ZwClose(s->ConnectionHandle);
-    if (s->AddressFileObj) ObDereferenceObject(s->AddressFileObj);
-    if (s->AddressHandle) ZwClose(s->AddressHandle);
+    // Clean TDI resources
+    if (s->ConnFileObj) {
+        ObDereferenceObject(s->ConnFileObj);
+    }
+    if (s->ConnectionHandle) {
+        ZwClose(s->ConnectionHandle);
+    }
+    if (s->AddressFileObj) {
+        ObDereferenceObject(s->AddressFileObj);
+    }
+    if (s->AddressHandle) {
+        ZwClose(s->AddressHandle);
+    }
 
     ExFreePoolWithTag(s, DRIVER_TAG);
+    
+    KTLS_LOG_INFO("Session closed successfully");
 }
