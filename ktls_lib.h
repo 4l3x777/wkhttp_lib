@@ -6,10 +6,6 @@
  * Provides secure transport layer (TLS 1.2/1.3) over TCP and DTLS over UDP,
  * with support for plain TCP when encryption is not required.
  * 
- * @author 4l3x777
- * @date 2026
- * @version 1.0
- * 
  * @section features Features
  * - TLS 1.2/1.3 over TCP (KTLS_PROTO_TCP)
  * - DTLS 1.2 over UDP (KTLS_PROTO_UDP)
