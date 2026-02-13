@@ -1719,9 +1719,25 @@ static NTSTATUS KhttpMultipartRequestChunked(
 
     // Resolve hostname
     ULONG HostIp;
+
+    ULONG DnsServer = DEFAULT_DNS_SERVER;
+    if (Config && Config->DnsServerIp != 0) {
+        DnsServer = Config->DnsServerIp;
+    }
+
+    DbgPrint("[KHTTP] DNS config check:\n");
+    DbgPrint("  Config provided: %s\n", Config ? "YES" : "NO");
+    DbgPrint("  Config->DnsServerIp: 0x%08X\n", Config ? Config->DnsServerIp : 0);
+    DbgPrint("  Using DNS Server: 0x%08X (%u.%u.%u.%u)\n",
+        DnsServer,
+        (DnsServer >> 0) & 0xFF,
+        (DnsServer >> 8) & 0xFF,
+        (DnsServer >> 16) & 0xFF,
+        (DnsServer >> 24) & 0xFF);
+
     Status = KdnsResolveWithCache(
         Hostname,
-        Config ? Config->DnsServerIp : DEFAULT_DNS_SERVER,
+        DnsServer,
         Config ? Config->TimeoutMs : DEFAULT_TIMEOUT,
         &HostIp
     );
