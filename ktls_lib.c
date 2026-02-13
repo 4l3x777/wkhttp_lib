@@ -41,6 +41,7 @@
 // =============================================================
 // LOGGING
 // =============================================================
+#define DBG 1
 
 #if DBG
 #define KTLS_LOG_ERROR(fmt, ...) DbgPrint("KTLS [ERROR]: " fmt "\n", ##__VA_ARGS__)
@@ -617,30 +618,28 @@ static NTSTATUS TdiRecvGeneric(PKTLS_SESSION s, PVOID Buffer, ULONG Len, PULONG 
 // =============================================================
 
 static int KernelEntropy(void* data, unsigned char* output, size_t len, size_t* olen) {
-    LARGE_INTEGER pc, st, it;
+    LARGE_INTEGER pc, st;
+    ULONGLONG it;
     ULONG proc_id;
-    
-    UNREFERENCED_PARAMETER(data);
-    
+
     KeQueryPerformanceCounter(&pc);
     KeQuerySystemTime(&st);
-    KeQueryInterruptTime(&it);
+    it = KeQueryInterruptTime();  
     proc_id = (ULONG)(ULONG_PTR)PsGetCurrentProcessId();
-    
+
     for (size_t i = 0; i < len; i++) {
-        // Mix multiple entropy sources with bit rotation
         output[i] = (unsigned char)(
             (pc.QuadPart >> ((i * 7) % 64)) ^
             (st.QuadPart >> ((i * 11) % 64)) ^
-            (it.QuadPart >> ((i * 13) % 64)) ^
+            (it >> ((i * 13) % 64)) ^  
             (proc_id << (i % 8))
-        );
-        
-        // Rotate sources for next iteration
+            );
+
         pc.QuadPart = _rotl64(pc.QuadPart, 1);
         st.QuadPart = _rotl64(st.QuadPart, 1);
+        it = _rotl64(it, 1);
     }
-    
+
     *olen = len;
     return 0;
 }
