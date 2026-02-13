@@ -174,6 +174,7 @@ PCHAR KhttpBuildRequest(
     _In_ PCHAR Path,
     _In_opt_ PCHAR Headers,
     _In_opt_ PCHAR Body,
+    _In_ BOOLEAN UseChunked,
     _Out_ PULONG RequestLength
 );
 

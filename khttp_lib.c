@@ -172,6 +172,7 @@ PCHAR KhttpBuildRequest(
     _In_ PCHAR Path,
     _In_opt_ PCHAR Headers,
     _In_opt_ PCHAR Body,
+    _In_ BOOLEAN UseChunked,
     _Out_ PULONG RequestLength
 ) {
     ULONG BodyLen = Body ? KhttpStrLen(Body) : 0;
@@ -226,8 +227,8 @@ PCHAR KhttpBuildRequest(
         }
     }
 
-    // Add Content-Length if body present
-    if (Body) {
+    // Add Content-Length if body present AND NOT chunked
+    if (Body && !UseChunked) {
         Status = RtlStringCbPrintfA(Buffer + Offset, Remaining,
             "Content-Length: %lu\r\n", BodyLen);
         if (!NT_SUCCESS(Status)) {
@@ -367,9 +368,6 @@ NTSTATUS KhttpRequest(
     Status = KhttpParseUrl(Url, &Hostname, &Port, &Path, &IsHttps);
     if (!NT_SUCCESS(Status)) goto Cleanup;
 
-    // Override HTTPS setting based on URL scheme OR config
-    if (Config && Config->UseHttps) IsHttps = TRUE;
-
     DbgPrint("[KHTTP] %s %s (Host: %s:%u, HTTPS: %d)\n",
         MethodNames[Method], Path, Hostname, Port, IsHttps);
 
@@ -436,7 +434,7 @@ NTSTATUS KhttpRequest(
 
     // Build and send request
     ULONG RequestLen;
-    RequestBuffer = KhttpBuildRequest(Method, Hostname, Path, Headers, Body, &RequestLen);
+    RequestBuffer = KhttpBuildRequest(Method, Hostname, Path, Headers, Body, FALSE, &RequestLen);
     if (!RequestBuffer) {
         Status = STATUS_INSUFFICIENT_RESOURCES;
         goto Cleanup;
@@ -1768,6 +1766,7 @@ static NTSTATUS KhttpMultipartRequestChunked(
         Path,
         ContentTypeHeader,
         UseChunked ? NULL : Body,  // No body in headers if chunked
+        UseChunked,
         &RequestLen
     );
 
