@@ -1882,13 +1882,38 @@ static NTSTATUS KhttpMultipartRequestChunked(
     }
 
 Cleanup:
-    // Clean up in correct order
-    if (ResponseBuffer) ExFreePoolWithTag(ResponseBuffer, KHTTP_TAG);
-    if (Session) KtlsClose(Session);
-    if (Path) ExFreePoolWithTag(Path, KHTTP_TAG);
-    if (Hostname) ExFreePoolWithTag(Hostname, KHTTP_TAG);
-    if (Body) ExFreePoolWithTag(Body, KHTTP_MULTIPART_TAG);
-    if (Boundary) ExFreePoolWithTag(Boundary, KHTTP_MULTIPART_TAG);
+    // Clean up in correct order with double-free protection
+    if (ResponseBuffer) {
+        ExFreePoolWithTag(ResponseBuffer, KHTTP_TAG);
+        ResponseBuffer = NULL;
+    }
+
+    if (Session) {
+        KtlsClose(Session);
+        Session = NULL;
+    }
+
+    if (Path) {
+        ExFreePoolWithTag(Path, KHTTP_TAG);
+        Path = NULL;
+    }
+
+    if (Hostname) {
+        ExFreePoolWithTag(Hostname, KHTTP_TAG);
+        Hostname = NULL;
+    }
+
+    // Only free Body if it was allocated (NOT in streaming mode)
+    if (!HasStreamFiles && Body) {
+        ExFreePoolWithTag(Body, KHTTP_MULTIPART_TAG);
+        Body = NULL;
+    }
+
+    // Boundary is always allocated, safe to free
+    if (Boundary) {
+        ExFreePoolWithTag(Boundary, KHTTP_MULTIPART_TAG);
+        Boundary = NULL;
+    }
 
     return Status;
 }

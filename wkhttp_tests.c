@@ -46,8 +46,8 @@ VOID TestTls(void) {
     ULONG Bytes;
     NTSTATUS Status;
 
-    DbgPrint("\n[TLS] Connecting to 1.1.1.1:4443...\n");
-    Status = KtlsConnect(INETADDR(1, 1, 1, 1), 4443, KTLS_PROTO_TCP, "1.1.1.1", &Session);
+    DbgPrint("\n[TLS] Connecting to 192.168.56.1:4443...\n");
+    Status = KtlsConnect(INETADDR(192, 168, 56, 1), 4443, KTLS_PROTO_TCP, "192.168.56.1", &Session);
     if (!NT_SUCCESS(Status)) {
         DbgPrint("[TLS] FAIL - 0x%08x\n", Status);
         return;
@@ -55,7 +55,7 @@ VOID TestTls(void) {
     DbgPrint("[TLS] Connected\n");
 
     KtlsSetTimeout(Session, 9000);
-    const char* Req = "GET / HTTP/1.1\r\nHost: 1.1.1.1\r\nConnection: close\r\n\r\n";
+    const char* Req = "GET / HTTP/1.1\r\nHost: 192.168.56.1\r\nConnection: close\r\n\r\n";
     KtlsSend(Session, (PVOID)Req, (ULONG)strlen(Req), &Bytes);
 
     Buffer = ExAllocatePoolWithTag(NonPagedPool, 4096, 'TEST');
@@ -76,8 +76,8 @@ VOID TestDtls(void) {
     ULONG Bytes;
     NTSTATUS Status;
 
-    DbgPrint("\n[DTLS] Connecting to 1.1.1.1:4443...\n");
-    Status = KtlsConnect(INETADDR(1, 1, 1, 1), 4443, KTLS_PROTO_UDP, "1.1.1.1", &Session);
+    DbgPrint("\n[DTLS] Connecting to 192.168.56.1:4443...\n");
+    Status = KtlsConnect(INETADDR(192, 168, 56, 1), 4443, KTLS_PROTO_UDP, "192.168.56.1", &Session);
     if (!NT_SUCCESS(Status)) {
         DbgPrint("[DTLS] FAIL - 0x%08x\n", Status);
         return;
@@ -510,7 +510,7 @@ VOID TestLargeFileUploadChunked(VOID)
 
     PKHTTP_RESPONSE Response = NULL;
     NTSTATUS Status = KhttpPostMultipartChunked(
-        "https://webhook.site/a6cbee2d-7bc2-4f51-88e3-4dc81cd14a56",
+        "http://192.168.56.1:8080/upload",
         NULL,
         NULL,
         0,
@@ -561,7 +561,7 @@ VOID TestFileStreamUpload()
 
     PKHTTP_RESPONSE Response = NULL;
     NTSTATUS Status = KhttpPostMultipartChunked(
-        "https://webhook.site/a6cbee2d-7bc2-4f51-88e3-4dc81cd14a56",
+        "https://192.168.56.1:8443/upload",
         NULL,
         NULL, 0,
         &File, 1,
@@ -598,7 +598,7 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath) 
     KhttpGlobalInit();
 
     // Low-level tests
-    /*TestDns();
+    TestDns();
     TestTls();
     TestDtls();
 
@@ -608,7 +608,7 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath) 
 
     // HTTPS tests (TLS)
     TestHttps();
-    TestRestApiHttps();*/
+    TestRestApiHttps();
 
     // HTTP tests multipart
     TestFileUpload();
