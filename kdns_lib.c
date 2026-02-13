@@ -3,10 +3,6 @@
 #include <tdikrnl.h>
 #include <ntstrsafe.h>
 
-// =============================================================
-// DNS CACHE
-// =============================================================
-
 typedef struct _DNS_CACHE_ENTRY {
     CHAR Hostname[256];
     ULONG IpAddress;
@@ -57,6 +53,132 @@ typedef struct _DNS_HEADER {
 static ULONG g_DnsSeed = 0;
 
 // =============================================================
+// DNS PACKET DEBUG FUNCTIONS
+// =============================================================
+#define KDNS_DEBUG_VERBOSE 1 // ON\OFF DNS DEBUG
+
+#if KDNS_DEBUG_VERBOSE
+
+static VOID KdnsHexDump(PCHAR Prefix, PVOID Data, ULONG Length) {
+    UCHAR* Bytes = (UCHAR*)Data;
+    DbgPrint("%s: Length=%lu bytes\n", Prefix, Length);
+
+    for (ULONG i = 0; i < Length; i += 16) {
+        DbgPrint("  %04X: ", i);
+
+        // Hex bytes
+        for (ULONG j = 0; j < 16; j++) {
+            if (i + j < Length) {
+                DbgPrint("%02X ", Bytes[i + j]);
+            }
+            else {
+                DbgPrint("   ");
+            }
+        }
+
+        DbgPrint(" | ");
+
+        // ASCII representation
+        for (ULONG j = 0; j < 16 && (i + j) < Length; j++) {
+            UCHAR c = Bytes[i + j];
+            DbgPrint("%c", (c >= 32 && c <= 126) ? c : '.');
+        }
+
+        DbgPrint("\n");
+    }
+}
+
+static VOID KdnsValidateDnsPacket(PVOID Packet, ULONG Length, PCHAR Hostname) {
+    if (Length < sizeof(DNS_HEADER)) {
+        DbgPrint("KDNS: [VALIDATE ERROR] Packet smaller than DNS header: %lu bytes\n", Length);
+        return;
+    }
+
+    DNS_HEADER* Hdr = (DNS_HEADER*)Packet;
+    PCHAR Qname = (PCHAR)(Hdr + 1);
+
+    DbgPrint("\n");
+    DbgPrint("KDNS: ========================================\n");
+    DbgPrint("KDNS: [VALIDATE] DNS Packet for '%s':\n", Hostname);
+    DbgPrint("KDNS: ========================================\n");
+    DbgPrint("  Total packet size: %lu bytes\n", Length);
+    DbgPrint("  Header size: %lu bytes\n", (ULONG)sizeof(DNS_HEADER));
+    DbgPrint("  ID: 0x%04X\n", NTOHS(Hdr->Id));
+    DbgPrint("  Flags: 0x%04X\n", NTOHS(Hdr->Flags));
+    DbgPrint("  Questions: %u\n", NTOHS(Hdr->QuestionCount));
+    DbgPrint("  Answers: %u\n", NTOHS(Hdr->AnswerCount));
+
+    // Validate QNAME structure
+    DbgPrint("\n  QNAME Analysis:\n");
+    ULONG Offset = 0;
+    ULONG LabelNum = 0;
+    BOOLEAN Valid = TRUE;
+
+    while (Offset < Length - sizeof(DNS_HEADER) && Qname[Offset] != 0) {
+        UCHAR LabelLen = (UCHAR)Qname[Offset];
+
+        if (LabelLen > 63) {
+            DbgPrint("    [ERROR] Invalid label length: %u at offset %lu\n",
+                LabelLen, Offset);
+            Valid = FALSE;
+            break;
+        }
+
+        if (LabelLen == 0) {
+            DbgPrint("    [ERROR] Empty label at offset %lu\n", Offset);
+            Valid = FALSE;
+            break;
+        }
+
+        // Print label content
+        DbgPrint("    Label[%lu]: length=%u \"", LabelNum, LabelLen);
+        for (ULONG i = 0; i < LabelLen && (Offset + 1 + i) < Length - sizeof(DNS_HEADER); i++) {
+            CHAR c = Qname[Offset + 1 + i];
+            DbgPrint("%c", (c >= 32 && c <= 126) ? c : '?');
+        }
+        DbgPrint("\"\n");
+
+        Offset += LabelLen + 1;
+        LabelNum++;
+
+        if (Offset >= Length - sizeof(DNS_HEADER)) {
+            DbgPrint("    [ERROR] QNAME exceeds packet boundary\n");
+            Valid = FALSE;
+            break;
+        }
+    }
+
+    if (Valid && Offset < Length - sizeof(DNS_HEADER) && Qname[Offset] == 0) {
+        DbgPrint("    Root terminator: OK (0x00 at offset %lu)\n", Offset);
+        DbgPrint("    Total QNAME length: %lu bytes\n", Offset + 1);
+    }
+    else if (!Valid) {
+        DbgPrint("    [ERROR] QNAME validation FAILED\n");
+    }
+    else {
+        DbgPrint("    [ERROR] Missing root terminator (0x00)\n");
+    }
+
+    // Check QTYPE and QCLASS
+    if (Offset + 1 + 4 <= Length - sizeof(DNS_HEADER)) {
+        USHORT* QType = (USHORT*)&Qname[Offset + 1];
+        USHORT* QClass = (USHORT*)&Qname[Offset + 3];
+        DbgPrint("    QTYPE: 0x%04X (%u)\n", NTOHS(*QType), NTOHS(*QType));
+        DbgPrint("    QCLASS: 0x%04X (%u)\n", NTOHS(*QClass), NTOHS(*QClass));
+    }
+
+    DbgPrint("KDNS: ========================================\n\n");
+
+    KdnsHexDump("KDNS: [PACKET HEX DUMP]", Packet, Length);
+    DbgPrint("\n");
+}
+
+#else
+#define KdnsHexDump(prefix, data, len)
+#define KdnsValidateDnsPacket(packet, len, host)
+#endif
+
+// =============================================================
 // HELPERS
 // =============================================================
 
@@ -85,23 +207,107 @@ static ULONG KdnsEncodeName(PCHAR Host, PCHAR Buf) {
     PCHAR LabelPtr = Buf;
     PCHAR Curr = Host;
     ULONG Cnt = 0;
+    ULONG LabelCount = 0;
+
+#if KDNS_DEBUG_VERBOSE
+    DbgPrint("\nKDNS: ========================================\n");
+    DbgPrint("KDNS: [ENCODE] Starting encoding for: '%s'\n", Host);
+    DbgPrint("KDNS: ========================================\n");
+#endif
 
     Len++; // Reserve first length byte
+
     while (*Curr) {
         if (*Curr == '.') {
+            // Validate label
+            if (Cnt == 0) {
+#if KDNS_DEBUG_VERBOSE
+                DbgPrint("KDNS: [ENCODE ERROR] Empty label at position %lu\n",
+                    (ULONG)(Curr - Host));
+#endif
+                return 0; // Invalid: empty label
+            }
+            if (Cnt > 63) {
+#if KDNS_DEBUG_VERBOSE
+                DbgPrint("KDNS: [ENCODE ERROR] Label too long: %lu > 63\n", Cnt);
+#endif
+                return 0; // Invalid: label > 63 chars
+            }
+
+            // Write label length
             *LabelPtr = (CHAR)Cnt;
+
+#if KDNS_DEBUG_VERBOSE
+            DbgPrint("  Label[%lu]: length=%lu, content=\"", LabelCount, Cnt);
+            for (ULONG i = 0; i < Cnt; i++) {
+                DbgPrint("%c", Buf[LabelPtr - Buf + 1 + i]);
+            }
+            DbgPrint("\"\n");
+#endif
+
             LabelPtr = Buf + Len;
             Cnt = 0;
             Len++;
+            LabelCount++;
         }
         else {
+            // Validate character
+            CHAR c = *Curr;
+
+#if KDNS_DEBUG_VERBOSE
+            // Check for suspicious characters
+            if (!((c >= 'a' && c <= 'z') ||
+                (c >= 'A' && c <= 'Z') ||
+                (c >= '0' && c <= '9') ||
+                c == '-' || c == '_')) {
+                DbgPrint("KDNS: [ENCODE WARNING] Unusual char 0x%02X ('%c') at position %lu\n",
+                    (UCHAR)c, c, (ULONG)(Curr - Host));
+            }
+#endif
+
             Buf[Len++] = *Curr;
             Cnt++;
+
+            if (Cnt > 63) {
+#if KDNS_DEBUG_VERBOSE
+                DbgPrint("KDNS: [ENCODE ERROR] Label exceeds 63 chars during parsing\n");
+#endif
+                return 0;
+            }
         }
         Curr++;
     }
+
+    // Write final label length
+    if (Cnt > 63) {
+#if KDNS_DEBUG_VERBOSE
+        DbgPrint("KDNS: [ENCODE ERROR] Final label too long: %lu > 63\n", Cnt);
+#endif
+        return 0;
+    }
+
     *LabelPtr = (CHAR)Cnt;
-    Buf[Len++] = 0;
+
+#if KDNS_DEBUG_VERBOSE
+    DbgPrint("  Label[%lu]: length=%lu, content=\"", LabelCount, Cnt);
+    for (ULONG i = 0; i < Cnt; i++) {
+        DbgPrint("%c", Buf[LabelPtr - Buf + 1 + i]);
+    }
+    DbgPrint("\"\n");
+#endif
+
+    Buf[Len++] = 0;  // Root terminator
+
+#if KDNS_DEBUG_VERBOSE
+    DbgPrint("\nKDNS: [ENCODE] Summary:\n");
+    DbgPrint("  Total labels: %lu\n", LabelCount + 1);
+    DbgPrint("  Encoded length: %lu bytes\n", Len);
+    DbgPrint("KDNS: ========================================\n\n");
+
+    KdnsHexDump("KDNS: [ENCODE] Encoded QNAME", Buf, Len);
+    DbgPrint("\n");
+#endif
+
     return Len;
 }
 
@@ -498,6 +704,39 @@ static NTSTATUS KdnsResolveInternal(PCHAR Hostname, ULONG DnsServerIp, ULONG Tim
     DbgPrint("KDNS: Hostname to resolve: '%s' (length: %lu)\n",
         Hostname, HostnameLen);
 
+#if KDNS_DEBUG_VERBOSE
+    // Special debug for problematic hostnames
+    DbgPrint("\nKDNS: [ANALYSIS] Character-by-character analysis:\n");
+    for (ULONG i = 0; i < HostnameLen; i++) {
+        UCHAR c = (UCHAR)Hostname[i];
+        DbgPrint("  [%02lu] = 0x%02X '%c' %s\n",
+            i, c, (c >= 32 && c <= 126) ? c : '?',
+            (c == '-') ? "(HYPHEN)" : (c == '.') ? "(DOT)" : "");
+    }
+
+    // Check for hidden/control characters
+    BOOLEAN HasControlChars = FALSE;
+    for (ULONG i = 0; i < HostnameLen; i++) {
+        UCHAR c = (UCHAR)Hostname[i];
+        if (c < 0x20 || c > 0x7E) {
+            DbgPrint("KDNS: [WARNING] Non-printable character 0x%02X at position %lu\n", c, i);
+            HasControlChars = TRUE;
+        }
+    }
+
+    if (!HasControlChars) {
+        DbgPrint("KDNS: [OK] No control characters detected\n");
+    }
+
+    // Count labels
+    ULONG DotCount = 0;
+    for (ULONG i = 0; i < HostnameLen; i++) {
+        if (Hostname[i] == '.') DotCount++;
+    }
+    DbgPrint("KDNS: [INFO] Hostname has %lu labels (dots: %lu)\n", DotCount + 1, DotCount);
+    DbgPrint("\n");
+#endif
+
     // Check length (DNS FQDN max 253, labels max 63)
     if (HostnameLen == 0) {
         DbgPrint("KDNS: [Error] Empty hostname\n");
@@ -551,6 +790,11 @@ static NTSTATUS KdnsResolveInternal(PCHAR Hostname, ULONG DnsServerIp, ULONG Tim
     Type[1] = HTONS(DNS_CLASS_IN);
     ReqLen += 4;
 
+#if KDNS_DEBUG_VERBOSE
+    // Validate packet before sending
+    KdnsValidateDnsPacket(Req, ReqLen, Hostname);
+#endif
+
     // Send & Receive
     Status = KdnsSendAndRecvWithPort(
         DnsServerIp,
@@ -564,6 +808,32 @@ static NTSTATUS KdnsResolveInternal(PCHAR Hostname, ULONG DnsServerIp, ULONG Tim
     );
     if (!NT_SUCCESS(Status)) {
         DbgPrint("KDNS: Send/Recv failed for %s: 0x%08X\n", Hostname, Status);
+
+#if KDNS_DEBUG_VERBOSE
+        DbgPrint("\nKDNS: ========================================\n");
+        DbgPrint("KDNS: [ERROR DETAILS] Send/Recv FAILED\n");
+        DbgPrint("KDNS: ========================================\n");
+        DbgPrint("  Hostname: %s\n", Hostname);
+        DbgPrint("  Status: 0x%08X\n", Status);
+        DbgPrint("  Request length: %lu bytes\n", ReqLen);
+        DbgPrint("  DNS Server: %u.%u.%u.%u\n",
+            (DnsServerIp >> 0) & 0xFF,
+            (DnsServerIp >> 8) & 0xFF,
+            (DnsServerIp >> 16) & 0xFF,
+            (DnsServerIp >> 24) & 0xFF);
+        DbgPrint("  Local Port: %u\n", LocalPort);
+
+        if (Status == 0xC0000207) {
+            DbgPrint("\n  [!] STATUS_INVALID_ADDRESS_COMPONENT detected!\n");
+            DbgPrint("  This means the network stack rejected the packet.\n");
+            DbgPrint("  Possible causes:\n");
+            DbgPrint("    - Malformed DNS query packet\n");
+            DbgPrint("    - Invalid QNAME encoding\n");
+            DbgPrint("    - Incorrect address structure\n");
+            DbgPrint("  Review the packet hex dump above.\n");
+        }
+        DbgPrint("KDNS: ========================================\n\n");
+#endif
 
         KdnsFree(Req);
         KdnsFree(Res);
