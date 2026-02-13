@@ -100,13 +100,13 @@ VOID PrintTestHeader(PCHAR SectionName)
 VOID PrintTestResult(PCHAR TestName, NTSTATUS Status, PCHAR AdditionalInfo)
 {
     if (NT_SUCCESS(Status)) {
-        DbgPrint("[✓] %s - SUCCESS", TestName);
+        DbgPrint("[+] %s - SUCCESS", TestName);
         if (AdditionalInfo) {
             DbgPrint(" (%s)", AdditionalInfo);
         }
         DbgPrint("\n");
     } else {
-        DbgPrint("[✗] %s - FAILED (0x%08X)", TestName, Status);
+        DbgPrint("[-] %s - FAILED (0x%08X)", TestName, Status);
         if (AdditionalInfo) {
             DbgPrint(" - %s", AdditionalInfo);
         }
@@ -861,7 +861,7 @@ VOID DriverUnload(PDRIVER_OBJECT DriverObject)
     DbgPrint("========================================\n");
     
     KhttpGlobalCleanup();
-    DbgPrint("[✓] Driver unloaded successfully\n");
+    DbgPrint("[+] Driver unloaded successfully\n");
 }
 
 /**
@@ -891,10 +891,10 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
     // Initialize library
     NTSTATUS Status = KhttpGlobalInit();
     if (!NT_SUCCESS(Status)) {
-        DbgPrint("[✗] Library initialization failed: 0x%08X\n", Status);
+        DbgPrint("[-] Library initialization failed: 0x%08X\n", Status);
         return Status;
     }
-    DbgPrint("[✓] Library initialized\n");
+    DbgPrint("[+] Library initialized\n");
 
     // Category 1: Protocol Tests
     PrintTestHeader("PROTOCOL TESTS");
