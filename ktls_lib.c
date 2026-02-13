@@ -98,6 +98,9 @@ typedef struct _KTLS_SESSION {
     // Flag to indicate if TLS is active
     BOOLEAN UseTls;
 
+    // Flag to indicate if connection is alive
+    BOOLEAN ConnectionAlive;
+
     // TDI Handles & Objects
     HANDLE AddressHandle;
     PFILE_OBJECT AddressFileObj;
@@ -533,6 +536,10 @@ static NTSTATUS TdiSendGeneric(PKTLS_SESSION s, PVOID Data, ULONG Len) {
     ExFreePoolWithTag(Buffer, DRIVER_TAG);
 
     if (!NT_SUCCESS(Status)) {
+        // Mark connection as dead
+        if (Status == STATUS_REMOTE_DISCONNECT) {
+            s->ConnectionAlive = FALSE;
+        }
         // Don't log error for expected disconnect during close
         if (Status != STATUS_REMOTE_DISCONNECT) {
             KTLS_LOG_ERROR("TdiSendGeneric failed: 0x%x", Status);
@@ -999,6 +1006,7 @@ NTSTATUS KtlsConnect(
     s->RemotePort = Port;
     s->UseTls = g_ProtocolConfigs[Protocol].SupportsTls;
     s->TimeoutMs = g_ProtocolConfigs[Protocol].DefaultTimeout;
+    s->ConnectionAlive = TRUE;
 
     KTLS_LOG_INFO("Connecting to %u.%u.%u.%u:%u (Protocol: %d, TLS: %d)",
         (Ip >> 0) & 0xFF, (Ip >> 8) & 0xFF, (Ip >> 16) & 0xFF, (Ip >> 24) & 0xFF,
@@ -1133,15 +1141,21 @@ VOID KtlsClose(PKTLS_SESSION s) {
 
     KTLS_LOG_INFO("Closing session");
 
-    // Close TLS connection gracefully only if handshake completed
-    if (s->UseTls && s->ssl.state == MBEDTLS_SSL_HANDSHAKE_OVER) {
+    // Close TLS connection gracefully ONLY if:
+    // 1. TLS is being used
+    // 2. Handshake was completed
+    // 3. Connection is still alive (not closed by peer)
+    if (s->UseTls && 
+        s->ssl.state == MBEDTLS_SSL_HANDSHAKE_OVER && 
+        s->ConnectionAlive) {
         int ret = mbedtls_ssl_close_notify(&s->ssl);
         
-        // Ignore expected errors when connection already closed
-        if (ret != 0 && 
-            ret != MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY && 
-            ret != MBEDTLS_ERR_SSL_CONN_EOF) {
-            KTLS_LOG_DEBUG("close_notify failed: -0x%x (connection may be already closed)", -ret);
+        if (ret != 0) {
+            // Log only if not an expected error
+            if (ret != MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY && 
+                ret != MBEDTLS_ERR_SSL_CONN_EOF) {
+                KTLS_LOG_DEBUG("close_notify failed: -0x%x", -ret);
+            }
         }
     }
 
