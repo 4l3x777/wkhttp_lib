@@ -34,6 +34,7 @@
 
 // mbedTLS Error Codes
 #define MBEDTLS_X509_CERT_VERIFY_FAILED (-0x3b00)
+#define MBEDTLS_ERR_SSL_CONN_EOF (-0x7100)
 
 // Tick to Millisecond Conversion
 #define TICKS_TO_MS_DIVISOR 10000
@@ -532,7 +533,10 @@ static NTSTATUS TdiSendGeneric(PKTLS_SESSION s, PVOID Data, ULONG Len) {
     ExFreePoolWithTag(Buffer, DRIVER_TAG);
 
     if (!NT_SUCCESS(Status)) {
-        KTLS_LOG_ERROR("TdiSendGeneric failed: 0x%x", Status);
+        // Don't log error for expected disconnect during close
+        if (Status != STATUS_REMOTE_DISCONNECT) {
+            KTLS_LOG_ERROR("TdiSendGeneric failed: 0x%x", Status);
+        }
     }
 
     return Status;
@@ -690,6 +694,10 @@ static int KernelNetSend(void* ctx, const unsigned char* buf, size_t len) {
     NTSTATUS status = TdiSendGeneric(s, (PVOID)buf, (ULONG)len);
     
     if (!NT_SUCCESS(status)) {
+        // Connection already closed by peer - this is expected during close
+        if (status == STATUS_REMOTE_DISCONNECT) {
+            return MBEDTLS_ERR_SSL_CONN_EOF;
+        }
         KTLS_LOG_ERROR("KernelNetSend failed: 0x%x", status);
         return MBEDTLS_ERR_SSL_INTERNAL_ERROR;
     }
@@ -903,6 +911,12 @@ static NTSTATUS PerformTlsHandshake(PKTLS_SESSION s) {
 
     } while (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE);
 
+    // Handle connection EOF
+    if (ret == MBEDTLS_ERR_SSL_CONN_EOF) {
+        KTLS_LOG_WARN("Connection closed by peer during handshake");
+        return STATUS_CONNECTION_DISCONNECTED;
+    }
+
     // Handle certificate verification errors
     if (ret == MBEDTLS_X509_CERT_VERIFY_FAILED) {
         uint32_t verify_flags = mbedtls_ssl_get_verify_result(&s->ssl);
@@ -1046,6 +1060,12 @@ NTSTATUS KtlsSend(PKTLS_SESSION Session, PVOID Data, ULONG Length, PULONG BytesS
     }
     
     *BytesSent = 0;
+    
+    if (ret == MBEDTLS_ERR_SSL_CONN_EOF) {
+        KTLS_LOG_WARN("Connection closed by peer during send");
+        return STATUS_CONNECTION_DISCONNECTED;
+    }
+    
     KTLS_LOG_ERROR("mbedtls_ssl_write failed: -0x%x", -ret);
     return STATUS_UNSUCCESSFUL;
 }
@@ -1099,6 +1119,11 @@ NTSTATUS KtlsRecv(PKTLS_SESSION Session, PVOID Buffer, ULONG BufferSize, PULONG 
         return STATUS_IO_TIMEOUT;
     }
 
+    if (ret == MBEDTLS_ERR_SSL_CONN_EOF) {
+        KTLS_LOG_WARN("Connection closed by peer during receive");
+        return STATUS_CONNECTION_DISCONNECTED;
+    }
+
     KTLS_LOG_ERROR("mbedtls_ssl_read failed: -0x%x", -ret);
     return STATUS_UNSUCCESSFUL;
 }
@@ -1108,9 +1133,16 @@ VOID KtlsClose(PKTLS_SESSION s) {
 
     KTLS_LOG_INFO("Closing session");
 
-    // Close TLS connection gracefully
+    // Close TLS connection gracefully only if handshake completed
     if (s->UseTls && s->ssl.state == MBEDTLS_SSL_HANDSHAKE_OVER) {
-        mbedtls_ssl_close_notify(&s->ssl);
+        int ret = mbedtls_ssl_close_notify(&s->ssl);
+        
+        // Ignore expected errors when connection already closed
+        if (ret != 0 && 
+            ret != MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY && 
+            ret != MBEDTLS_ERR_SSL_CONN_EOF) {
+            KTLS_LOG_DEBUG("close_notify failed: -0x%x (connection may be already closed)", -ret);
+        }
     }
 
     // Clean mbedTLS contexts (only if initialized)
