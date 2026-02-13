@@ -1612,26 +1612,34 @@ static NTSTATUS KhttpMultipartRequestChunked(
 
     *Response = NULL;
 
-    // Check if we should use chunked transfer
-    BOOLEAN UseChunked = FALSE;
+    // Check if we have stream files FIRST - streaming REQUIRES chunked
+    BOOLEAN HasStreamFiles = FALSE;
+    for (ULONG i = 0; i < FileCount; i++) {
+        if (Files && Files[i].UseFileStream) {
+            HasStreamFiles = TRUE;
+            break;
+        }
+    }
+
+    // Initialize chunked settings
+    BOOLEAN UseChunked = HasStreamFiles;  // Force TRUE if streaming
     ULONG ChunkSize = KHTTP_CHUNK_SIZE;
 
     if (Config) {
-        UseChunked = Config->UseChunkedTransfer;
+        // Config can enable chunked, but CANNOT disable if streaming
+        if (Config->UseChunkedTransfer || HasStreamFiles) {
+            UseChunked = TRUE;
+        }
+
         if (Config->ChunkSize > 0 && Config->ChunkSize <= KHTTP_MAX_CHUNK_SIZE) {
             ChunkSize = Config->ChunkSize;
         }
     }
 
-    // Check if we have stream files - MUST use chunked
-    BOOLEAN HasStreamFiles = FALSE;
-    for (ULONG i = 0; i < FileCount; i++) {
-        if (Files && Files[i].UseFileStream) {
-            HasStreamFiles = TRUE;
-            UseChunked = TRUE;  // Force chunked for streaming
-            break;
-        }
-    }
+    DbgPrint("[KHTTP] Chunked mode: %s (streaming: %s, config: %s)\n",
+        UseChunked ? "ENABLED" : "DISABLED",
+        HasStreamFiles ? "YES" : "NO",
+        (Config && Config->UseChunkedTransfer) ? "YES" : "NO");
 
     // Calculate total body size to decide on chunked transfer
     ULONG TotalFileSize = 0;
