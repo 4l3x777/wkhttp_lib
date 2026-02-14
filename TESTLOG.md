@@ -1,265 +1,422 @@
 ```log
-00000001	0.00000000	 	
-00000002	0.00001050	[Driver] Windows Kernel HTTP Library	
-00000003	0.00036530	KDNS: Cache initialized	
-00000004	0.00039060	[KHTTP] Initialized	
-00000005	0.00039920	 	
-00000006	0.00040610	[DNS] Resolving ya.ru...	
-00000007	0.00041590	KDNS: Resolving ya.ru using local port 50001 (depth: 0)	
-00000008	0.00043440	KDNS: Binding to local port 50001	
-00000009	0.00140850	KDNS: Sent 23 bytes from port 50001	
-00000010	0.21352939	KDNS: Received 86 bytes on port 50001	
-00000011	0.36767560	KDNS: Port 50001 released	
-00000012	0.36769721	KDNS: Resolved ya.ru -> f2ffff05 (depth 0)	
-00000013	0.58522379	KDNS: Cleanup completed for ya.ru (status: 0x00000000)	
-00000014	0.58526742	[DNS] OK - IP: 05.ff.ff.f2	
-00000015	0.58529031	 	
-00000016	0.58530349	[TLS] Connecting to 1.1.1.1:4443...	
-00000017	0.58550602	KTLS: SNI hostname set to: 1.1.1.1	
-00000018	0.58629400	KTLS: Address opened successfully (Device: TCP)	
-00000019	0.72943437	KTLS: Handshake successful	
-00000020	0.72944951	[TLS] Connected	
-00000021	0.73036402	[TLS] RX 71 bytes:	
-00000022	0.73038220	[TLS-Server] Echo: GET / HTTP/1.1 	
-00000023	0.73039252	Host: 1.1.1.1 	
-00000024	0.73041201	Connection: close 	
-00000025	0.73042279	 	
-00000026	0.73043799	 	
-00000027	0.73215681	 	
-00000028	0.73217320	[DTLS] Connecting to 1.1.1.1:4443...	
-00000029	0.73223412	KTLS: SNI hostname set to: 1.1.1.1	
-00000030	0.73274088	KTLS: Address opened successfully (Device: UDP)	
-00000031	0.85717851	KTLS: Handshake successful	
-00000032	0.85719401	[DTLS] Connected	
-00000033	1.05904543	[DTLS] RX 30 bytes:	
-00000034	1.05906904	[DTLS-Server] Echo: Hello DTLS 	
-00000035	1.05989158	 	
-00000036	1.05990291	[HTTP] GET httpbin.org/get	
-00000037	1.05992460	[KHTTP] GET /get (Host: httpbin.org:80, HTTPS: 0)	
-00000038	1.05994046	KDNS: Cache miss for httpbin.org, performing DNS query	
-00000039	1.05995595	KDNS: Resolving httpbin.org using local port 50002 (depth: 0)	
-00000040	1.06042266	KDNS: Binding to local port 50002	
-00000041	1.06149316	KDNS: Sent 29 bytes from port 50002	
-00000042	2.06598163	KDNS: Received 191 bytes on port 50002	
-00000043	2.22454405	KDNS: Port 50002 released	
-00000044	2.22483730	KDNS: Resolved httpbin.org -> 3d5bc52c (depth 0)	
-00000045	2.42582870	KDNS: Cleanup completed for httpbin.org (status: 0x00000000)	
-00000046	2.42585230	KDNS: Cached httpbin.org -> 3D5BC52C	
-00000047	2.42619729	KTLS: Address opened successfully (Device: TCP)	
-00000048	5.92464256	[HTTP] Status 200, Size 197	
-00000049	5.92467499	 	
-00000050	5.92468262	[HTTP] POST httpbin.org/post	
-00000051	5.92469501	[KHTTP] POST /post (Host: httpbin.org:80, HTTPS: 0)	
-00000052	5.92470646	KDNS: Cache hit for httpbin.org -> 3D5BC52C	
-00000053	5.92488527	KTLS: Address opened successfully (Device: TCP)	
-00000054	9.20240402	[HTTP] Status 200	
-00000055	9.20244026	 	
-00000056	9.20244694	[HTTP] HEAD ya.ru	
-00000057	9.20245934	[KHTTP] HEAD / (Host: ya.ru:80, HTTPS: 0)	
-00000058	9.20247078	KDNS: Cache miss for ya.ru, performing DNS query	
-00000059	9.20248032	KDNS: Resolving ya.ru using local port 50003 (depth: 0)	
-00000060	9.20249271	KDNS: Binding to local port 50003	
-00000061	9.20326042	KDNS: Sent 23 bytes from port 50003	
-00000062	9.20525169	KDNS: Received 86 bytes on port 50003	
-00000063	9.36057377	KDNS: Port 50003 released	
-00000064	9.36058998	KDNS: Resolved ya.ru -> f2ffff05 (depth 0)	
-00000065	9.56247807	KDNS: Cleanup completed for ya.ru (status: 0x00000000)	
-00000066	9.56250191	KDNS: Cached ya.ru -> F2FFFF05	
-00000067	9.56284809	KTLS: Address opened successfully (Device: TCP)	
-00000068	13.09317398	[HTTP] Status 301, Body 0 bytes	
-00000069	13.09320831	 	
-00000070	13.09321594	[REST] GET /posts/1	
-00000071	13.09323597	[KHTTP] GET /posts/1 (Host: jsonplaceholder.typicode.com:80, HTTPS: 0)	
-00000072	13.09324741	KDNS: Cache miss for jsonplaceholder.typicode.com, performing DNS query	
-00000073	13.09325790	KDNS: Resolving jsonplaceholder.typicode.com using local port 50004 (depth: 0)	
-00000074	13.09327030	KDNS: Binding to local port 50004	
-00000075	13.09398746	KDNS: Sent 46 bytes from port 50004	
-00000076	13.72995663	KDNS: Received 134 bytes on port 50004	
-00000077	13.89119053	KDNS: Port 50004 released	
-00000078	13.89121628	KDNS: Resolved jsonplaceholder.typicode.com -> 006172bc (depth 0)	
-00000079	14.10659981	KDNS: Cleanup completed for jsonplaceholder.typicode.com (status: 0x00000000)	
-00000080	14.10662746	KDNS: Cached jsonplaceholder.typicode.com -> 006172BC	
-00000081	14.10716438	KTLS: Address opened successfully (Device: TCP)	
-00000082	16.88203812	[REST] Status 200	
-00000083	16.88207054	 	
-00000084	16.88207626	[REST] POST /posts	
-00000085	16.88208961	[KHTTP] POST /posts (Host: jsonplaceholder.typicode.com:80, HTTPS: 0)	
-00000086	16.88210106	KDNS: Cache hit for jsonplaceholder.typicode.com -> 006172BC	
-00000087	16.88230324	KTLS: Address opened successfully (Device: TCP)	
-00000088	19.64722824	[REST] Status 201	
-00000089	19.64726067	 	
-00000090	19.64726639	[REST] PUT /posts/1	
-00000091	19.64728165	[KHTTP] PUT /posts/1 (Host: jsonplaceholder.typicode.com:80, HTTPS: 0)	
-00000092	19.64729309	KDNS: Cache hit for jsonplaceholder.typicode.com -> 006172BC	
-00000093	19.64748573	KTLS: Address opened successfully (Device: TCP)	
-00000094	22.41193008	[REST] Status 200	
-00000095	22.41197014	 	
-00000096	22.41198158	[REST] PATCH /posts/1	
-00000097	22.41200256	[KHTTP] PATCH /posts/1 (Host: jsonplaceholder.typicode.com:80, HTTPS: 0)	
-00000098	22.41201973	KDNS: Cache hit for jsonplaceholder.typicode.com -> 006172BC	
-00000099	22.41222000	KTLS: Address opened successfully (Device: TCP)	
-00000100	24.97251701	[REST] Status 200	
-00000101	24.97256088	 	
-00000102	24.97257233	[REST] DELETE /posts/1	
-00000103	24.97259331	[KHTTP] DELETE /posts/1 (Host: jsonplaceholder.typicode.com:80, HTTPS: 0)	
-00000104	24.97261047	KDNS: Cache hit for jsonplaceholder.typicode.com -> 006172BC	
-00000105	24.97307587	KTLS: Address opened successfully (Device: TCP)	
-00000106	29.98935318	[REST] Status 200	
-00000107	29.98945618	 	
-00000108	29.98946571	[HTTPS] GET httpbin.org/get	
-00000109	29.98948479	[KHTTP] GET /get (Host: httpbin.org:443, HTTPS: 1)	
-00000110	29.98950005	KDNS: Cache hit for httpbin.org -> 3D5BC52C	
-00000111	29.98969841	KTLS: SNI hostname set to: httpbin.org	
-00000112	29.98997688	KTLS: Address opened successfully (Device: TCP)	
-00000113	31.75381851	KTLS: Handshake successful	
-00000114	31.75383759	KTLS: ALPN protocol: http/1.1	
-00000115	31.95903397	[HTTPS] Status 200, Size 233	
-00000116	31.95904922	[HTTPS] Body: {	
-00000117	31.95905685	  "args": {}, 	
-00000118	31.95906639	  "headers": {	
-00000119	31.95907211	    "Accept": "application/json", 	
-00000120	31.95907784	    "Host": "httpbin.org", 	
-00000121	31.95908546	    "X-Amzn-Trace-Id": "Root=1-6985e9b6-31b2de0549fc0e6...	
-00000122	31.95911026	 	
-00000123	31.95911980	[HTTPS] POST httpbin.org/post	
-00000124	31.95913315	[KHTTP] POST /post (Host: httpbin.org:443, HTTPS: 1)	
-00000125	31.95914268	KDNS: Cache hit for httpbin.org -> 3D5BC52C	
-00000126	31.95918465	KTLS: SNI hostname set to: httpbin.org	
-00000127	31.95936394	KTLS: Address opened successfully (Device: TCP)	
-00000128	34.87332535	KTLS: Handshake successful	
-00000129	34.87334061	KTLS: ALPN protocol: http/1.1	
-00000130	38.79706955	[HTTPS] Status 200	
-00000131	38.79710388	 	
-00000132	38.79711151	[HTTPS] GET jsonplaceholder.typicode.com/posts/1	
-00000133	38.79712296	[KHTTP] GET /posts/1 (Host: jsonplaceholder.typicode.com:443, HTTPS: 1)	
-00000134	38.79713440	KDNS: Cache hit for jsonplaceholder.typicode.com -> 006172BC	
-00000135	38.79718018	KTLS: SNI hostname set to: jsonplaceholder.typicode.com	
-00000136	38.79735184	KTLS: Address opened successfully (Device: TCP)	
-00000137	40.24283981	KTLS: Handshake successful	
-00000138	40.24286652	KTLS: ALPN protocol: http/1.1	
-00000139	42.30204773	[HTTPS] Status 200	
-00000140	42.30207443	[HTTPS] Body: {	
-00000141	42.30208206	  "userId": 1,	
-00000142	42.30209732	  "id": 1,	
-00000143	42.30211258	  "title": "sunt aut facere repellat provident occaecati excepturi optio...	
-00000144	42.30213928	 	
-00000145	42.30214691	[HTTPS] HEAD ya.ru	
-00000146	42.30215836	[KHTTP] HEAD / (Host: ya.ru:443, HTTPS: 1)	
-00000147	42.30217361	KDNS: Cache hit for ya.ru -> F2FFFF05	
-00000148	42.30227661	KTLS: SNI hostname set to: ya.ru	
-00000149	42.30247116	KTLS: Address opened successfully (Device: TCP)	
-00000150	43.01646805	KTLS: Handshake successful	
-00000151	43.01648331	KTLS: ALPN protocol: http/1.1	
-00000152	43.22935104	[HTTPS] Status 200, Body 0 bytes	
-00000153	43.22939301	 	
-00000154	43.22940063	[REST-HTTPS] GET /posts/1	
-00000155	43.22941589	[KHTTP] GET /posts/1 (Host: jsonplaceholder.typicode.com:443, HTTPS: 1)	
-00000156	43.22943497	KDNS: Cache hit for jsonplaceholder.typicode.com -> 006172BC	
-00000157	43.22949600	KTLS: SNI hostname set to: jsonplaceholder.typicode.com	
-00000158	43.23007202	KTLS: Address opened successfully (Device: TCP)	
-00000159	46.39604950	KTLS: Handshake successful	
-00000160	46.39606857	KTLS: ALPN protocol: http/1.1	
-00000161	46.50033951	[REST-HTTPS] Status 200	
-00000162	46.50037384	 	
-00000163	46.50038147	[REST-HTTPS] POST /posts	
-00000164	46.50039291	[KHTTP] POST /posts (Host: jsonplaceholder.typicode.com:443, HTTPS: 1)	
-00000165	46.50040817	KDNS: Cache hit for jsonplaceholder.typicode.com -> 006172BC	
-00000166	46.50063324	KTLS: SNI hostname set to: jsonplaceholder.typicode.com	
-00000167	46.50082397	KTLS: Address opened successfully (Device: TCP)	
-00000168	48.44401550	KTLS: Handshake successful	
-00000169	48.44403076	KTLS: ALPN protocol: http/1.1	
-00000170	48.65046310	[REST-HTTPS] Status 201	
-00000171	48.65049744	 	
-00000172	48.65050125	[REST-HTTPS] PUT /posts/1	
-00000173	48.65051651	[KHTTP] PUT /posts/1 (Host: jsonplaceholder.typicode.com:443, HTTPS: 1)	
-00000174	48.65052414	KDNS: Cache hit for jsonplaceholder.typicode.com -> 006172BC	
-00000175	48.65056992	KTLS: SNI hostname set to: jsonplaceholder.typicode.com	
-00000176	48.65076828	KTLS: Address opened successfully (Device: TCP)	
-00000177	50.49266815	KTLS: Handshake successful	
-00000178	50.49268341	KTLS: ALPN protocol: http/1.1	
-00000179	51.62029266	[REST-HTTPS] Status 200	
-00000180	51.62034988	 	
-00000181	51.62035751	[REST-HTTPS] DELETE /posts/1	
-00000182	51.62037277	[KHTTP] DELETE /posts/1 (Host: jsonplaceholder.typicode.com:443, HTTPS: 1)	
-00000183	51.62038422	KDNS: Cache hit for jsonplaceholder.typicode.com -> 006172BC	
-00000184	51.62047195	KTLS: SNI hostname set to: jsonplaceholder.typicode.com	
-00000185	51.62065506	KTLS: Address opened successfully (Device: TCP)	
-00000186	52.33544159	KTLS: Handshake successful	
-00000187	52.33546066	KTLS: ALPN protocol: http/1.1	
-00000188	52.55338669	[REST-HTTPS] Status 200	
-00000189	52.55342484	[KHTTP] Starting multipart request to https://httpbin.org/post	
-00000190	52.55344391	[KHTTP] Generated boundary: ----24OiS3SDga5YQ0ZyJ8VxQWWe7N8kXZuWVN0pF4K1	
-00000191	52.55345535	[KHTTP] Built multipart body: 1236 bytes	
-00000192	52.55346680	[KHTTP] Built multipart body: 1236 bytes	
-00000193	52.55347824	[KHTTP] Making HTTP request	
-00000194	52.55348969	[KHTTP] POST /post (Host: httpbin.org:443, HTTPS: 1)	
-00000195	52.55349731	KDNS: Cache hit for httpbin.org -> 3D5BC52C	
-00000196	52.55353546	KTLS: SNI hostname set to: httpbin.org	
-00000197	52.55373764	KTLS: Address opened successfully (Device: TCP)	
-00000198	53.57344818	KTLS: Handshake successful	
-00000199	53.57346725	KTLS: ALPN protocol: http/1.1	
-00000200	55.79491806	[KHTTP] Request completed: 0x00000000	
-00000201	55.79497147	[KHTTP] Upload status: 200	
-00000202	55.79498291	[KHTTP] Response body length: 1860	
-00000203	57.80470276	[KHTTP] Starting multipart request to https://example.com/upload	
-00000204	57.80475998	[KHTTP] Generated boundary: ----h9jZEjGbQe0Z9eNblNDWwjotltQvMfdZ8cYXnf2c	
-00000205	57.80478668	[KHTTP] Built multipart body: 2477 bytes	
-00000206	57.80479813	[KHTTP] Built multipart body: 2477 bytes	
-00000207	57.80482101	[KHTTP] Making HTTP request	
-00000208	57.80484009	[KHTTP] POST /upload (Host: example.com:443, HTTPS: 1)	
-00000209	57.80485916	KDNS: Cache miss for example.com, performing DNS query	
-00000210	57.80487061	KDNS: Resolving example.com using local port 50005 (depth: 0)	
-00000211	57.80491638	KDNS: Binding to local port 50005	
-00000212	57.80579376	KDNS: Sent 29 bytes from port 50005	
-00000213	57.96977234	KDNS: Received 83 bytes on port 50005	
-00000214	58.12197876	KDNS: Port 50005 released	
-00000215	58.12200165	KDNS: Resolved example.com -> 781a1268 (depth 0)	
-00000216	58.32305908	KDNS: Cleanup completed for example.com (status: 0x00000000)	
-00000217	58.32308960	KDNS: Cached example.com -> 781A1268	
-00000218	58.32323837	KTLS: SNI hostname set to: example.com	
-00000219	58.32348251	KTLS: Address opened successfully (Device: TCP)	
-00000220	59.09523010	KTLS: Handshake successful	
-00000221	59.09524536	KTLS: ALPN protocol: http/1.1	
-00000222	59.30157471	[KHTTP] Request completed: 0x00000000	
-00000223	59.30162430	[KHTTP] Upload completed: 405	
-00000224	61.30821609	[KHTTP] Starting multipart request to https://httpbin.org/post	
-00000225	61.30826187	[KHTTP] Generated boundary: ----slGLDn9TF7rQnplAV96GUrm7OoNFd0zZX3ZHsgQP	
-00000226	61.30827332	[KHTTP] Built multipart body: 1900 bytes	
-00000227	61.30828857	[KHTTP] Built multipart body: 1900 bytes	
-00000228	61.30830002	[KHTTP] Making HTTP request	
-00000229	61.30831528	[KHTTP] POST /post (Host: httpbin.org:443, HTTPS: 1)	
-00000230	61.30832672	KDNS: Cache hit for httpbin.org -> 3D5BC52C	
-00000231	61.30841064	KTLS: SNI hostname set to: httpbin.org	
-00000232	61.30866623	KTLS: Address opened successfully (Device: TCP)	
-00000233	62.47319794	KTLS: Handshake successful	
-00000234	62.47321701	KTLS: ALPN protocol: http/1.1	
-00000235	64.01581573	[KHTTP] Request completed: 0x00000000	
-00000236	64.01586914	[KHTTP] Multiple files uploaded: 200	
-00000237	66.02862549	[KHTTP] Large body detected (5242880 bytes), enabling chunked transfer	
-00000238	66.02864075	[KHTTP] Starting multipart request to https://httpbin.org/post (chunked: 1)	
-00000239	66.04899597	[KHTTP] Built multipart body: 5243097 bytes	
-00000240	66.04901886	[KHTTP] Built multipart body: 5243097 bytes	
-00000241	66.04904938	KDNS: Cache hit for httpbin.org -> 3D5BC52C	
-00000242	66.04914093	KTLS: SNI hostname set to: httpbin.org	
-00000243	66.04940033	KTLS: Address opened successfully (Device: TCP)	
-00000244	67.08484650	KTLS: Handshake successful	
-00000245	67.08486176	KTLS: ALPN protocol: http/1.1	
-00000246	67.08556366	[KHTTP] Starting chunked transfer: 5243097 bytes (chunk: 65536)	
-00000247	67.10507202	[KHTTP] Sent: 655360/5243097 bytes (12%)	
-00000248	67.12341309	[KHTTP] Sent: 1310720/5243097 bytes (24%)	
-00000249	67.14465332	[KHTTP] Sent: 1966080/5243097 bytes (37%)	
-00000250	67.16476440	[KHTTP] Sent: 2621440/5243097 bytes (49%)	
-00000251	67.18486023	[KHTTP] Sent: 3276800/5243097 bytes (62%)	
-00000252	67.20494843	[KHTTP] Sent: 3932160/5243097 bytes (74%)	
-00000253	67.22424316	[KHTTP] Sent: 4587520/5243097 bytes (87%)	
-00000254	67.24534607	[KHTTP] Sent: 5242880/5243097 bytes (99%)	
-00000255	67.24678040	[KHTTP] Sent: 5243097/5243097 bytes (100%)	
-00000256	67.24747467	[KHTTP] Chunked transfer complete: 5243097 bytes	
-00000257	69.03249359	[KHTTP] Large file uploaded: 200 (size: 5242880 bytes)	
-00000258	69.03405762	 	
-00000259	69.03406525	[Driver] Tests complete	
-00000260	92.58624268	KDNS: Cache cleaned up	
-00000261	92.58626556	[KHTTP] Cleaned up	
-00000262	92.58627319	 	
-00000263	92.58628845	[Driver] Unloaded	
+00000008	159.96389771	========================================	
+00000009	159.96391296	  Windows Kernel HTTP Library	
+00000010	159.96391296	  Comprehensive Test Suite	
+00000011	159.96391296	========================================	
+00000012	159.96391296	KDNS: Random seed initialized: 0x00002FAA	
+00000013	159.96395874	KDNS: Cache initialized (size=32, TTL=300s)	
+00000014	159.96395874	KDNS: Library initialized	
+00000015	159.96395874	[KHTTP] Initialized	
+00000016	159.96395874	[+] Library initialized	
+00000017	159.96395874	 	
+00000018	159.96395874	========================================	
+00000019	159.96395874	  PROTOCOL TESTS	
+00000020	159.96395874	========================================	
+00000021	159.96395874	 	
+00000022	159.96395874	[DNS] Resolving ya.ru...	
+00000023	159.96395874	KDNS: Resolving 'ya.ru' (depth=0, len=5)	
+00000024	159.96397400	KDNS: Built query for 'ya.ru' (ID=0x1616, len=23)	
+00000025	159.96405029	KDNS: TDI bound to port 50001	
+00000026	159.96421814	KDNS: Sent 23 bytes	
+00000027	160.03436279	KDNS: Received 86 bytes	
+00000028	160.14065552	KDNS: Parsing 3 answer(s)	
+00000029	160.14067078	KDNS: Found A record: 77.88.44.242	
+00000030	160.14067078	KDNS: Resolution complete: ya.ru -> 77.88.44.242	
+00000031	160.14067078	[DNS] Resolved to: 77.88.44.242	
+00000032	160.14067078	[+] DNS Resolution - SUCCESS 	
+00000033	160.14067078	 	
+00000034	160.14067078	[TLS] Connecting to 192.168.56.1:4443...	
+00000035	160.24961853	[TLS] Handshake completed	
+00000036	160.25009155	[TLS] Sent 57 bytes	
+00000037	160.25010681	[TLS] Received 76 bytes:	
+00000038	160.25010681	[TLS-Server] Echo: GET / HTTP/1.1 	
+00000039	160.25010681	Host: 192.168.56.1 	
+00000040	160.25010681	Connection: close 	
+00000041	160.25010681	 	
+00000042	160.25010681	 	
+00000043	160.25010681	[+] TLS Communication - SUCCESS 	
+00000044	160.25076294	 	
+00000045	160.25076294	[DTLS] Connecting to 192.168.56.1:4443...	
+00000046	160.25840759	[DTLS] Handshake completed	
+00000047	160.25860596	[DTLS] Sent 10 bytes	
+00000048	160.45980835	[DTLS] Received 30 bytes:	
+00000049	160.45982361	[DTLS-Server] Echo: Hello DTLS 	
+00000050	160.45982361	[+] DTLS Communication - SUCCESS 	
+00000051	160.46017456	 	
+00000052	160.46017456	========================================	
+00000053	160.46017456	  HTTP TESTS (Plain TCP)	
+00000054	160.46017456	========================================	
+00000055	160.46018982	 	
+00000056	160.46018982	[HTTP GET] httpbin.org/get	
+00000057	160.46018982	[KHTTP] Connecting to httpbin.org:80 (HTTPS: 0)	
+00000058	160.46018982	KDNS: Cache miss, querying DNS	
+00000059	160.46020508	KDNS: Resolving 'httpbin.org' (depth=0, len=11)	
+00000060	160.46022034	KDNS: Built query for 'httpbin.org' (ID=0xEE2F, len=29)	
+00000061	160.46063232	KDNS: TDI bound to port 50002	
+00000062	160.46105957	KDNS: Sent 29 bytes	
+00000063	160.52676392	KDNS: Received 191 bytes	
+00000064	160.64273071	KDNS: Parsing 6 answer(s)	
+00000065	160.64274597	KDNS: Found A record: 44.195.71.76	
+00000066	160.64274597	KDNS: Resolution complete: httpbin.org -> 44.195.71.76	
+00000067	160.64274597	KDNS: Cached [httpbin.org -> 44.195.71.76]	
+00000068	160.64978027	[KHTTP] GET /get (Host: httpbin.org:80, HTTPS: 0)	
+00000069	160.65014648	[KHTTP] Receiving response (max 1048576 bytes)...	
+00000070	161.31587219	[KHTTP] Received 422 bytes (total: 422)	
+00000071	162.40141296	[KHTTP] Connection closed, total received: 422 bytes	
+00000072	162.40182495	[+] HTTP GET - SUCCESS (Status: 200, Body: 197 bytes) 	
+00000073	162.40187073	 	
+00000074	162.40187073	[HTTP POST] httpbin.org/post	
+00000075	162.40188599	[KHTTP] Connecting to httpbin.org:80 (HTTPS: 0)	
+00000076	162.40188599	KDNS: Cache HIT [httpbin.org -> 44.195.71.76]	
+00000077	162.40817261	[KHTTP] POST /post (Host: httpbin.org:80, HTTPS: 0)	
+00000078	162.40844727	[KHTTP] Receiving response (max 1048576 bytes)...	
+00000079	162.95016479	[KHTTP] Received 632 bytes (total: 632)	
+00000080	163.94595337	[KHTTP] Connection closed, total received: 632 bytes	
+00000081	163.94674683	[+] HTTP POST - SUCCESS (Status: 200) 	
+00000082	163.94674683	 	
+00000083	163.94674683	[HTTP HEAD] ya.ru	
+00000084	163.94676208	[KHTTP] Connecting to ya.ru:80 (HTTPS: 0)	
+00000085	163.94676208	KDNS: Cache miss, querying DNS	
+00000086	163.94676208	KDNS: Resolving 'ya.ru' (depth=0, len=5)	
+00000087	163.94689941	KDNS: Built query for 'ya.ru' (ID=0x1028, len=23)	
+00000088	163.94711304	KDNS: TDI bound to port 50003	
+00000089	163.94783020	KDNS: Sent 23 bytes	
+00000090	163.95918274	KDNS: Received 86 bytes	
+00000091	164.06896973	KDNS: Parsing 3 answer(s)	
+00000092	164.06896973	KDNS: Found A record: 77.88.44.242	
+00000093	164.06896973	KDNS: Resolution complete: ya.ru -> 77.88.44.242	
+00000094	164.06896973	KDNS: Cached [ya.ru -> 77.88.44.242]	
+00000095	164.07963562	[KHTTP] HEAD / (Host: ya.ru:80, HTTPS: 0)	
+00000096	164.07986450	[KHTTP] Receiving response (max 1048576 bytes)...	
+00000097	164.12257385	[KHTTP] Received 1332 bytes (total: 1332)	
+00000098	164.12260437	[KHTTP] Connection closed, total received: 1332 bytes	
+00000099	164.12353516	[+] HTTP HEAD - SUCCESS (Status: 301, Body: 0 bytes) 	
+00000100	164.12353516	 	
+00000101	164.12353516	[REST] GET /posts/1	
+00000102	164.12355042	[KHTTP] Connecting to jsonplaceholder.typicode.com:80 (HTTPS: 0)	
+00000103	164.12355042	KDNS: Cache miss, querying DNS	
+00000104	164.12355042	KDNS: Resolving 'jsonplaceholder.typicode.com' (depth=0, len=28)	
+00000105	164.12356567	KDNS: Built query for 'jsonplaceholder.typicode.com' (ID=0x1809, len=46)	
+00000106	164.12365723	KDNS: TDI bound to port 50004	
+00000107	164.12387085	KDNS: Sent 46 bytes	
+00000108	164.19253540	KDNS: Received 134 bytes	
+00000109	164.29376221	KDNS: Parsing 2 answer(s)	
+00000110	164.29376221	KDNS: Found A record: 188.114.96.0	
+00000111	164.29377747	KDNS: Resolution complete: jsonplaceholder.typicode.com -> 188.114.96.0	
+00000112	164.29377747	KDNS: Cached [jsonplaceholder.typicode.com -> 188.114.96.0]	
+00000113	164.30636597	[KHTTP] GET /posts/1 (Host: jsonplaceholder.typicode.com:80, HTTPS: 0)	
+00000114	164.30715942	[KHTTP] Receiving response (max 1048576 bytes)...	
+00000115	164.50921631	[KHTTP] Received 1479 bytes (total: 1479)	
+00000116	165.49783325	[KHTTP] Connection closed, total received: 1479 bytes	
+00000117	165.49855042	[+] REST GET - SUCCESS (Status: 200) 	
+00000118	165.49855042	 	
+00000119	165.49855042	[REST] POST /posts	
+00000120	165.49856567	[KHTTP] Connecting to jsonplaceholder.typicode.com:80 (HTTPS: 0)	
+00000121	165.49856567	KDNS: Cache HIT [jsonplaceholder.typicode.com -> 188.114.96.0]	
+00000122	165.50584412	[KHTTP] POST /posts (Host: jsonplaceholder.typicode.com:80, HTTPS: 0)	
+00000123	165.50640869	[KHTTP] Receiving response (max 1048576 bytes)...	
+00000124	165.87037659	[KHTTP] Received 1366 bytes (total: 1366)	
+00000125	166.86279297	[KHTTP] Connection closed, total received: 1366 bytes	
+00000126	166.86315918	[+] REST POST - SUCCESS (Status: 201) 	
+00000127	166.86315918	 	
+00000128	166.86315918	[REST] PUT /posts/1	
+00000129	166.86315918	[KHTTP] Connecting to jsonplaceholder.typicode.com:80 (HTTPS: 0)	
+00000130	166.86315918	KDNS: Cache HIT [jsonplaceholder.typicode.com -> 188.114.96.0]	
+00000131	166.87074280	[KHTTP] PUT /posts/1 (Host: jsonplaceholder.typicode.com:80, HTTPS: 0)	
+00000132	166.87101746	[KHTTP] Receiving response (max 1048576 bytes)...	
+00000133	167.23841858	[KHTTP] Received 1229 bytes (total: 1229)	
+00000134	168.23306274	[KHTTP] Connection closed, total received: 1229 bytes	
+00000135	168.23329163	[+] REST PUT - SUCCESS (Status: 200) 	
+00000136	168.23329163	 	
+00000137	168.23329163	[REST] PATCH /posts/1	
+00000138	168.23329163	[KHTTP] Connecting to jsonplaceholder.typicode.com:80 (HTTPS: 0)	
+00000139	168.23329163	KDNS: Cache HIT [jsonplaceholder.typicode.com -> 188.114.96.0]	
+00000140	168.24009705	[KHTTP] PATCH /posts/1 (Host: jsonplaceholder.typicode.com:80, HTTPS: 0)	
+00000141	168.24032593	[KHTTP] Receiving response (max 1048576 bytes)...	
+00000142	168.60278320	[KHTTP] Received 1379 bytes (total: 1379)	
+00000143	169.59378052	[KHTTP] Connection closed, total received: 1379 bytes	
+00000144	169.59402466	[+] REST PATCH - SUCCESS (Status: 200) 	
+00000145	169.59403992	 	
+00000146	169.59403992	[REST] DELETE /posts/1	
+00000147	169.59403992	[KHTTP] Connecting to jsonplaceholder.typicode.com:80 (HTTPS: 0)	
+00000148	169.59403992	KDNS: Cache HIT [jsonplaceholder.typicode.com -> 188.114.96.0]	
+00000149	169.60183716	[KHTTP] DELETE /posts/1 (Host: jsonplaceholder.typicode.com:80, HTTPS: 0)	
+00000150	169.60221863	[KHTTP] Receiving response (max 1048576 bytes)...	
+00000151	169.95625305	[KHTTP] Received 1157 bytes (total: 1157)	
+00000152	170.95117188	[KHTTP] Connection closed, total received: 1157 bytes	
+00000153	170.95173645	[+] REST DELETE - SUCCESS (Status: 200) 	
+00000154	170.95173645	 	
+00000155	170.95173645	========================================	
+00000156	170.95173645	  HTTPS TESTS (TLS)	
+00000157	170.95173645	========================================	
+00000158	170.95173645	 	
+00000159	170.95173645	[HTTPS GET] httpbin.org/get	
+00000160	170.95175171	[KHTTP] Connecting to httpbin.org:443 (HTTPS: 1)	
+00000161	170.95175171	KDNS: Cache HIT [httpbin.org -> 44.195.71.76]	
+00000162	171.46496582	[KHTTP] GET /get (Host: httpbin.org:443, HTTPS: 1)	
+00000163	171.46520996	[KHTTP] Receiving response (max 1048576 bytes)...	
+00000164	171.61592102	[KHTTP] Received 458 bytes (total: 458)	
+00000165	171.61596680	[KHTTP] Connection closed, total received: 458 bytes	
+00000166	171.61734009	[+] HTTPS GET - SUCCESS (Status: 200, Body: 233 bytes) 	
+00000167	171.61735535	[Preview] {	
+00000168	171.61735535	  "args": {}, 	
+00000169	171.61735535	  "headers": {	
+00000170	171.61735535	    "Accept": "application/json", 	
+00000171	171.61735535	    "Host": "httpbin.org", 	
+00000172	171.61735535	    "X-Amzn-Trace-Id": "Root=1-69901c2d-1c1c4fa11ad357f...	
+00000173	171.61735535	 	
+00000174	171.61735535	[HTTPS POST] httpbin.org/post	
+00000175	171.61737061	[KHTTP] Connecting to httpbin.org:443 (HTTPS: 1)	
+00000176	171.61737061	KDNS: Cache HIT [httpbin.org -> 44.195.71.76]	
+00000177	172.12850952	[KHTTP] POST /post (Host: httpbin.org:443, HTTPS: 1)	
+00000178	172.12893677	[KHTTP] Receiving response (max 1048576 bytes)...	
+00000179	172.28584290	[KHTTP] Received 225 bytes (total: 225)	
+00000180	172.28584290	[KHTTP] Received 447 bytes (total: 672)	
+00000181	173.28433228	[KHTTP] Connection closed, total received: 672 bytes	
+00000182	173.28503418	[+] HTTPS POST - SUCCESS (Status: 200) 	
+00000183	173.28503418	 	
+00000184	173.28503418	[HTTPS GET] jsonplaceholder.typicode.com/posts/1	
+00000185	173.28503418	[KHTTP] Connecting to jsonplaceholder.typicode.com:443 (HTTPS: 1)	
+00000186	173.28504944	KDNS: Cache HIT [jsonplaceholder.typicode.com -> 188.114.96.0]	
+00000187	173.54335022	[KHTTP] GET /posts/1 (Host: jsonplaceholder.typicode.com:443, HTTPS: 1)	
+00000188	173.54411316	[KHTTP] Receiving response (max 1048576 bytes)...	
+00000189	173.61203003	[KHTTP] Received 1369 bytes (total: 1369)	
+00000190	173.61207581	[KHTTP] Received 137 bytes (total: 1506)	
+00000191	173.61209106	[KHTTP] Connection closed, total received: 1506 bytes	
+00000192	173.61331177	[+] HTTPS REST API - SUCCESS (Status: 200) 	
+00000193	173.61332703	[Preview] {	
+00000194	173.61332703	  "userId": 1,	
+00000195	173.61332703	  "id": 1,	
+00000196	173.61332703	  "title": "sunt aut facere repellat provident occaecati excepturi optio...	
+00000197	173.61332703	 	
+00000198	173.61332703	[HTTPS HEAD] ya.ru	
+00000199	173.61334229	[KHTTP] Connecting to ya.ru:443 (HTTPS: 1)	
+00000200	173.61334229	KDNS: Cache HIT [ya.ru -> 77.88.44.242]	
+00000201	173.70417786	[KHTTP] HEAD / (Host: ya.ru:443, HTTPS: 1)	
+00000202	173.70503235	[KHTTP] Receiving response (max 1048576 bytes)...	
+00000203	173.73971558	[KHTTP] Received 1717 bytes (total: 1717)	
+00000204	173.73974609	[KHTTP] Connection closed, total received: 1717 bytes	
+00000205	173.74084473	[+] HTTPS HEAD - SUCCESS (Status: 200) 	
+00000206	173.74084473	 	
+00000207	173.74084473	[REST-HTTPS] GET /posts/1	
+00000208	173.74085999	[KHTTP] Connecting to jsonplaceholder.typicode.com:443 (HTTPS: 1)	
+00000209	173.74085999	KDNS: Cache HIT [jsonplaceholder.typicode.com -> 188.114.96.0]	
+00000210	174.07218933	[KHTTP] GET /posts/1 (Host: jsonplaceholder.typicode.com:443, HTTPS: 1)	
+00000211	174.07334900	[KHTTP] Receiving response (max 1048576 bytes)...	
+00000212	174.15133667	[KHTTP] Received 1369 bytes (total: 1369)	
+00000213	174.15136719	[KHTTP] Received 137 bytes (total: 1506)	
+00000214	174.15141296	[KHTTP] Connection closed, total received: 1506 bytes	
+00000215	174.15275574	[+] REST-HTTPS GET - SUCCESS (Status: 200) 	
+00000216	174.15275574	 	
+00000217	174.15275574	[REST-HTTPS] POST /posts	
+00000218	174.15277100	[KHTTP] Connecting to jsonplaceholder.typicode.com:443 (HTTPS: 1)	
+00000219	174.15277100	KDNS: Cache HIT [jsonplaceholder.typicode.com -> 188.114.96.0]	
+00000220	174.42068481	[KHTTP] POST /posts (Host: jsonplaceholder.typicode.com:443, HTTPS: 1)	
+00000221	174.42143250	[KHTTP] Receiving response (max 1048576 bytes)...	
+00000222	174.57949829	[KHTTP] Received 1369 bytes (total: 1369)	
+00000223	174.57952881	[KHTTP] Received 23 bytes (total: 1392)	
+00000224	174.57955933	[KHTTP] Connection closed, total received: 1392 bytes	
+00000225	174.58045959	[+] REST-HTTPS POST - SUCCESS (Status: 201) 	
+00000226	174.58045959	 	
+00000227	174.58045959	[REST-HTTPS] PUT /posts/1	
+00000228	174.58045959	[KHTTP] Connecting to jsonplaceholder.typicode.com:443 (HTTPS: 1)	
+00000229	174.58045959	KDNS: Cache HIT [jsonplaceholder.typicode.com -> 188.114.96.0]	
+00000230	174.84005737	[KHTTP] PUT /posts/1 (Host: jsonplaceholder.typicode.com:443, HTTPS: 1)	
+00000231	174.84060669	[KHTTP] Receiving response (max 1048576 bytes)...	
+00000232	175.16284180	[KHTTP] Received 1274 bytes (total: 1274)	
+00000233	175.16288757	[KHTTP] Connection closed, total received: 1274 bytes	
+00000234	175.16415405	[+] REST-HTTPS PUT - SUCCESS (Status: 200) 	
+00000235	175.16415405	 	
+00000236	175.16415405	[REST-HTTPS] DELETE /posts/1	
+00000237	175.16415405	[KHTTP] Connecting to jsonplaceholder.typicode.com:443 (HTTPS: 1)	
+00000238	175.16424561	KDNS: Cache HIT [jsonplaceholder.typicode.com -> 188.114.96.0]	
+00000239	175.42413330	[KHTTP] DELETE /posts/1 (Host: jsonplaceholder.typicode.com:443, HTTPS: 1)	
+00000240	175.42521667	[KHTTP] Receiving response (max 1048576 bytes)...	
+00000241	175.74922180	[KHTTP] Received 1191 bytes (total: 1191)	
+00000242	175.74925232	[KHTTP] Connection closed, total received: 1191 bytes	
+00000243	175.75065613	[+] REST-HTTPS DELETE - SUCCESS (Status: 200) 	
+00000244	175.75065613	 	
+00000245	175.75065613	========================================	
+00000246	175.75065613	  FILE UPLOAD TESTS	
+00000247	175.75065613	========================================	
+00000248	175.75065613	 	
+00000249	175.75065613	[UPLOAD] Single file test (1KB)	
+00000250	175.75067139	[KHTTP] Starting multipart request to https://httpbin.org/post (chunked: 0, streaming: 0)	
+00000251	175.75067139	[KHTTP] Generated boundary: ----gm2Ric3E4nJa0I5SOS1v7GF3zJFV30MB1aumjtII	
+00000252	175.75068665	[KHTTP] Connecting to httpbin.org:443 (HTTPS: 1)	
+00000253	175.75068665	KDNS: Cache HIT [httpbin.org -> 44.195.71.76]	
+00000254	176.27429199	[KHTTP] POST /post (Host: httpbin.org:443, HTTPS: 1)	
+00000255	176.27430725	[KHTTP] Built multipart body: 1236 bytes	
+00000256	176.27430725	[KHTTP] Built multipart body: 1236 bytes	
+00000257	176.27468872	[KHTTP] Headers sent: 1441 bytes	
+00000258	176.27522278	[KHTTP] Receiving response (max 1048576 bytes)...	
+00000259	176.43721008	[KHTTP] Received 2086 bytes (total: 2086)	
+00000260	177.43667603	[KHTTP] Connection closed, total received: 2086 bytes	
+00000261	177.43678284	[KHTTP] Response received: status 200	
+00000262	177.43707275	[+] Single File Upload - SUCCESS (Status: 200, Response: 1860 bytes) 	
+00000263	179.43757629	 	
+00000264	179.43757629	[UPLOAD] File with form fields (2KB)	
+00000265	179.43760681	[KHTTP] Starting multipart request to https://example.com/upload (chunked: 0, streaming: 0)	
+00000266	179.43763733	[KHTTP] Generated boundary: ----esepwFauIDvzfnVtFK0coDOBkmQXwqe85wUA3bu3	
+00000267	179.43765259	[KHTTP] Connecting to example.com:443 (HTTPS: 1)	
+00000268	179.43765259	KDNS: Cache miss, querying DNS	
+00000269	179.43766785	KDNS: Resolving 'example.com' (depth=0, len=11)	
+00000270	179.43766785	KDNS: Built query for 'example.com' (ID=0x2307, len=29)	
+00000271	179.43786621	KDNS: TDI bound to port 50005	
+00000272	179.43820190	KDNS: Sent 29 bytes	
+00000273	179.50164795	KDNS: Received 83 bytes	
+00000274	179.61399841	KDNS: Parsing 2 answer(s)	
+00000275	179.61401367	KDNS: Found A record: 104.18.27.120	
+00000276	179.61402893	KDNS: Resolution complete: example.com -> 104.18.27.120	
+00000277	179.61402893	KDNS: Cached [example.com -> 104.18.27.120]	
+00000278	180.51324463	[KHTTP] POST /upload (Host: example.com:443, HTTPS: 1)	
+00000279	180.51325989	[KHTTP] Built multipart body: 2494 bytes	
+00000280	180.51325989	[KHTTP] Built multipart body: 2494 bytes	
+00000281	180.51406860	[KHTTP] Headers sent: 2669 bytes	
+00000282	180.51518250	[KHTTP] Receiving response (max 1048576 bytes)...	
+00000283	180.58204651	[KHTTP] Received 706 bytes (total: 706)	
+00000284	180.58206177	[KHTTP] Received 5 bytes (total: 711)	
+00000285	180.58206177	[KHTTP] Connection closed, total received: 711 bytes	
+00000286	180.58218384	[KHTTP] Response received: status 405	
+00000287	180.58255005	[+] File+Form Upload - SUCCESS (Status: 405) 	
+00000288	182.59306335	 	
+00000289	182.59306335	[UPLOAD] Multiple files with progress (512B + 1KB)	
+00000290	182.59306335	[KHTTP] Starting multipart request to https://httpbin.org/post (chunked: 0, streaming: 0)	
+00000291	182.59307861	[KHTTP] Generated boundary: ----vll8jNMyKGWLElEc4i3jN5qzmpNYxPGIA33c18u6	
+00000292	182.59309387	[KHTTP] Connecting to httpbin.org:443 (HTTPS: 1)	
+00000293	182.59309387	KDNS: Cache HIT [httpbin.org -> 44.195.71.76]	
+00000294	183.11798096	[KHTTP] POST /post (Host: httpbin.org:443, HTTPS: 1)	
+00000295	183.11799622	[KHTTP] Built multipart body: 1900 bytes	
+00000296	183.11799622	[KHTTP] Built multipart body: 1900 bytes	
+00000297	183.11828613	[KHTTP] Headers sent: 2073 bytes	
+00000298	183.11909485	[KHTTP] Receiving response (max 5242880 bytes)...	
+00000299	183.28242493	[KHTTP] Connection closed, total received: 0 bytes	
+00000300	183.28244019	[KHTTP] [WARN] No data received	
+00000301	183.28321838	[-] Multiple Files Upload - FAILED (0x80000022) - Upload failed 	
+00000302	185.29963684	 	
+00000303	185.29963684	[UPLOAD] Large file chunked transfer (5MB)	
+00000304	185.30018616	[KHTTP] Large body detected (5242880 bytes), enabling chunked transfer	
+00000305	185.30018616	[KHTTP] Starting multipart request to http://192.168.56.1:8080/upload (chunked: 1, streaming: 0)	
+00000306	185.30020142	[KHTTP] Generated boundary: ----GQX2qZAtoAcRR9aMpf4ws6GqN2Gn7JEoKdKnIK1i	
+00000307	185.30020142	[KHTTP] Connecting to 192.168.56.1:8080 (HTTPS: 0)	
+00000308	185.30020142	KDNS: Cache miss, querying DNS	
+00000309	185.30020142	KDNS: Resolving '192.168.56.1' (depth=0, len=12)	
+00000310	185.30021667	KDNS: Parsed IPv4: 192.168.56.1 -> 0x0138A8C0	
+00000311	185.30021667	KDNS: Hostname is IP address, no DNS query needed	
+00000312	185.30021667	KDNS: Cached [192.168.56.1 -> 192.168.56.1]	
+00000313	185.30067444	[KHTTP] POST /upload (Host: 192.168.56.1:8080, HTTPS: 0)	
+00000314	185.30186462	[KHTTP] Built multipart body: 5243097 bytes	
+00000315	185.30186462	[KHTTP] Built multipart body: 5243097 bytes	
+00000316	185.34741211	[KHTTP] Headers sent: 182 bytes	
+00000317	195.60365295	[KHTTP] [STREAMING] Sending chunk terminator	
+00000318	195.60842896	[KHTTP] Receiving response (max 5242880 bytes)...	
+00000319	195.60852051	[KHTTP] Received 266 bytes (total: 266)	
+00000320	195.60853577	[KHTTP] Connection closed, total received: 266 bytes	
+00000321	195.60856628	[KHTTP] Response received: status 200	
+00000322	195.61056519	[+] Large File Upload - SUCCESS (Status: 200, Size: 5242880 bytes) 	
+00000323	197.62463379	 	
+00000324	197.62463379	[UPLOAD] Streaming file from disk	
+00000325	197.62464905	[KHTTP] Starting multipart request to https://192.168.56.1:8443/upload (chunked: 1, streaming: 1)	
+00000326	197.62469482	[KHTTP] Generated boundary: ----p1IO15zmjbs9BXkvSDKeJITm4YCBOeg7g20ZNiQ9	
+00000327	197.62471008	[KHTTP] Connecting to 192.168.56.1:8443 (HTTPS: 1)	
+00000328	197.62472534	KDNS: Cache HIT [192.168.56.1 -> 192.168.56.1]	
+00000329	197.73049927	[KHTTP] POST /upload (Host: 192.168.56.1:8443, HTTPS: 1)	
+00000330	197.73049927	[KHTTP] Using streaming mode	
+00000331	197.77610779	[KHTTP] Headers sent: 182 bytes	
+00000332	197.91996765	[KHTTP] [STREAMING] File size: 5193152 bytes	
+00000333	198.02517700	[PROGRESS] 5% (262305/5193152 bytes)	
+00000334	198.14799500	[PROGRESS] 10% (524449/5193152 bytes)	
+00000335	198.25787354	[PROGRESS] 15% (786593/5193152 bytes)	
+00000336	198.36595154	[PROGRESS] 20% (1048737/5193152 bytes)	
+00000337	198.47526550	[PROGRESS] 25% (1310881/5193152 bytes)	
+00000338	198.58503723	[PROGRESS] 30% (1573025/5193152 bytes)	
+00000339	198.69438171	[PROGRESS] 35% (1835169/5193152 bytes)	
+00000340	198.80296326	[PROGRESS] 40% (2097313/5193152 bytes)	
+00000341	198.91279602	[PROGRESS] 45% (2359457/5193152 bytes)	
+00000342	199.02342224	[PROGRESS] 50% (2621601/5193152 bytes)	
+00000343	199.13314819	[PROGRESS] 55% (2883745/5193152 bytes)	
+00000344	199.24330139	[PROGRESS] 60% (3145889/5193152 bytes)	
+00000345	199.35269165	[PROGRESS] 65% (3408033/5193152 bytes)	
+00000346	199.46215820	[PROGRESS] 70% (3670177/5193152 bytes)	
+00000347	199.57136536	[PROGRESS] 75% (3932321/5193152 bytes)	
+00000348	199.66432190	[PROGRESS] 80% (4194465/5193152 bytes)	
+00000349	199.77191162	[PROGRESS] 85% (4456609/5193152 bytes)	
+00000350	199.88069153	[PROGRESS] 90% (4718753/5193152 bytes)	
+00000351	199.98844910	[PROGRESS] 95% (4980897/5193152 bytes)	
+00000352	200.09631348	[PROGRESS] 100% (5193313/5193152 bytes)	
+00000353	200.09631348	[KHTTP] Upload progress: 100%	
+00000354	200.23730469	[PROGRESS] 100% (5193315/5193152 bytes)	
+00000355	200.23730469	[KHTTP] Upload progress: 100%	
+00000356	200.37600708	[PROGRESS] 100% (5193365/5193152 bytes)	
+00000357	200.37600708	[KHTTP] Upload progress: 100%	
+00000358	200.37602234	[KHTTP] [STREAMING] Sending chunk terminator	
+00000359	200.37727356	[KHTTP] Receiving response (max 0 bytes)...	
+00000360	200.37731934	[KHTTP] Received 265 bytes (total: 265)	
+00000361	200.37734985	[KHTTP] Connection closed, total received: 265 bytes	
+00000362	200.37738037	[KHTTP] Response received: status 200	
+00000363	200.37802124	[+] Streaming Upload - SUCCESS (Status: 200) 	
+00000364	200.37802124	 	
+00000365	200.37803650	========================================	
+00000366	200.37803650	  All Tests Completed	
+00000367	200.37803650	========================================	
+00000368	204.42848206	 	
+00000369	204.42848206	========================================	
+00000370	204.42849731	  Unloading Driver	
+00000371	204.42849731	========================================	
+00000372	204.42849731	KDNS: Cache cleanup (hits=16, misses=5, evictions=0)	
+00000373	204.42849731	KDNS: Library cleanup complete	
+00000374	204.42849731	[KHTTP] Cleaned up	
+00000375	204.42849731	[+] Driver unloaded successfully	
+```
+
+```log
+  Multi-Protocol Server Started:
+[TLS] Listening TCP/4443...
+[HTTP] Listening on 0.0.0.0:8080...
+[DTLS] Listening UDP/4443...
+[HTTPS] Listening on 0.0.0.0:8443...
+   ├─ TLS/DTLS: 0.0.0.0:4443 (TCP & UDP)
+   ├─ HTTP:     http://0.0.0.0:8080
+   └─ HTTPS:    https://0.0.0.0:8443
+  Test endpoints:
+   POST http://localhost:8080/upload     (chunked multipart)
+   POST https://localhost:8443/upload    (chunked multipart)
+   POST http://localhost:8080/echo       (echo test)
+[TLS] New connection from 192.168.56.7:65334
+[TLS] RECV (192.168.56.7:65334): GET / HTTP/1.1
+    Host: 192.168.56.1
+    Connection: close
+[TLS] Connection closed (192.168.56.7:65334): EOF
+[DTLS] New connection from 192.168.56.7:62083
+[DTLS] RECV (192.168.56.7:62083): Hello DTLS
+[DTLS] Connection closed (192.168.56.7:62083): EOF
+[UPLOAD] POST /upload from 192.168.56.7:65354
+[UPLOAD] Content-Type: multipart/form-data; boundary=----GQX2qZAtoAcRR9aMpf4ws6GqN2Gn7JEoKdKnIK1i
+[UPLOAD] Transfer-Encoding:
+[UPLOAD] Content-Length:
+[UPLOAD] Is Chunked: false
+[UPLOAD] Progress: 0 MB (100 chunks)
+[UPLOAD] Progress: 1 MB (128 chunks)
+[UPLOAD] Progress: 1 MB (200 chunks)
+[UPLOAD] Progress: 2 MB (256 chunks)
+[UPLOAD] Progress: 2 MB (300 chunks)
+[UPLOAD] Progress: 3 MB (384 chunks)
+[UPLOAD] Progress: 3 MB (400 chunks)
+[UPLOAD] Progress: 3 MB (500 chunks)
+[UPLOAD] Progress: 4 MB (512 chunks)
+[UPLOAD] Progress: 4 MB (600 chunks)
+[UPLOAD] Progress: 5 MB (640 chunks)
+[UPLOAD]   Complete: 5243097 bytes (641 chunks) in 10.30s (0.49 MB/s)
+[UPLOAD] POST /upload from 192.168.56.7:65355
+[UPLOAD] Content-Type: multipart/form-data; boundary=----p1IO15zmjbs9BXkvSDKeJITm4YCBOeg7g20ZNiQ9
+[UPLOAD] Transfer-Encoding:
+[UPLOAD] Content-Length:
+[UPLOAD] Is Chunked: false
+[UPLOAD] Progress: 0 MB (100 chunks)
+[UPLOAD] Progress: 1 MB (200 chunks)
+[UPLOAD] Progress: 2 MB (300 chunks)
+[UPLOAD] Progress: 3 MB (400 chunks)
+[UPLOAD] Progress: 3 MB (500 chunks)
+[UPLOAD] Progress: 4 MB (600 chunks)
+[UPLOAD]   Complete: 5193365 bytes (637 chunks) in 2.64s (1.87 MB/s)
 ```
