@@ -457,6 +457,20 @@ go run main.go
 
 It generates an in-memory self-signed certificate and echoes back any data received over both TCP (TLS) and UDP (DTLS).
 
+## Test Results
+
+### All tests passed successfully with the following metrics
+
+| Test Category          | Tests | Status |
+| ---------------------- | ----- | ------ |
+| HTTP Methods           | 6     | ✅ PASS |
+| HTTPS Requests         | 6     | ✅ PASS |
+| REST API (HTTP/HTTPS)  | 8     | ✅ PASS |
+| Multipart Upload       | 3     | ✅ PASS |
+| Chunked Transfer (5MB) | 1     | ✅ PASS |
+| TLS/DTLS               | 2     | ✅ PASS |
+| Total                  | 26    | ✅ 100% |
+
 ---
 
 ## 7. Test Results

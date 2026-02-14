@@ -49,4 +49,15 @@ VOID KdnsCleanupCache(VOID);
 // Clear all cached entries
 VOID KdnsClearCache(VOID);
 
+// DNS Cache functions
+VOID KdnsInitializeCache(VOID);
+VOID KdnsCleanupCache(VOID);
+
+NTSTATUS KdnsResolveWithCache(
+    _In_ PCHAR Hostname,
+    _In_ ULONG DnsServerIp,
+    _In_ ULONG TimeoutMs,
+    _Out_ PULONG ResolvedIp
+);
+
 #endif // _KDNS_LIB_H_
