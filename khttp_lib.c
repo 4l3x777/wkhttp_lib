@@ -111,17 +111,6 @@ static PCHAR KhttpStrDup(PCHAR Str) {
 // SAFE MEMORY OPERATIONS
 // ========================================
 
-/**
- * @brief Safe memory copy with exception handling and bounds checking
- * 
- * Wraps RtlCopyMemory in SEH to catch access violations.
- * Prevents BSOD from invalid memory access during chunk parsing.
- * 
- * @param Dest Destination buffer
- * @param Src Source buffer
- * @param Length Number of bytes to copy
- * @return STATUS_SUCCESS on success, STATUS_ACCESS_VIOLATION on fault
- */
 static NTSTATUS KhttpSafeMemcpy(
     _Out_writes_bytes_(Length) PVOID Dest,
     _In_reads_bytes_(Length) PVOID Src,
@@ -151,13 +140,6 @@ static NTSTATUS KhttpSafeMemcpy(
     }
 }
 
-/**
- * @brief Validate memory address range
- * 
- * @param Address Starting address
- * @param Length Length of memory range
- * @return TRUE if address appears valid, FALSE otherwise
- */
 static BOOLEAN KhttpIsAddressValid(
     _In_ PVOID Address,
     _In_ SIZE_T Length
@@ -1128,18 +1110,6 @@ VOID KhttpFreeResponse(_In_ PKHTTP_RESPONSE Response) {
 // CHUNKED DECODING (WITH VALIDATION)
 // ========================================
 
-/**
- * @brief Decode HTTP chunked transfer encoding with full validation
- * 
- * Parses chunked response data according to RFC 7230 Section 4.1.
- * Includes extensive validation to prevent buffer overflows and crashes.
- * 
- * @param ChunkedData Raw chunked data from HTTP response body
- * @param ChunkedLength Total length of chunked data
- * @param DecodedData Output buffer for decoded data (caller must free)
- * @param DecodedLength Output length of decoded data
- * @return STATUS_SUCCESS on success, error code on failure
- */
 NTSTATUS KhttpDecodeChunked(
     _In_ PCHAR ChunkedData,
     _In_ ULONG ChunkedLength,
