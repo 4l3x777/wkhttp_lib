@@ -35,6 +35,9 @@
 // mbedTLS Error Codes
 #define MBEDTLS_X509_CERT_VERIFY_FAILED (-0x3b00)
 #define MBEDTLS_ERR_SSL_CONN_EOF (-0x7100)
+#define MBEDTLS_ERR_NET_SEND_FAILED (-0x004E)
+#define MBEDTLS_ERR_NET_CONN_RESET (-0x0050)
+#define MBEDTLS_ERR_SSL_WANT_WRITE (-0x6c00)
 
 // Tick to Millisecond Conversion
 #define TICKS_TO_MS_DIVISOR 10000
@@ -100,6 +103,9 @@ typedef struct _KTLS_SESSION {
     // Flag to indicate if connection is alive
     BOOLEAN ConnectionAlive;
 
+    // Flag to prevent double close
+    BOOLEAN IsClosing;
+
     // TDI Handles & Objects
     HANDLE AddressHandle;
     PFILE_OBJECT AddressFileObj;
@@ -131,7 +137,24 @@ static NTSTATUS InitializeTlsContext(PKTLS_SESSION s, PCHAR Hostname);
 static NTSTATUS EstablishTransportConnection(PKTLS_SESSION s);
 static NTSTATUS PerformTlsHandshake(PKTLS_SESSION s);
 static ULONG GetElapsedMs(LARGE_INTEGER Start);
-static NTSTATUS SafeBufferCopy(PVOID Dest, SIZE_T DestSize, PVOID Src, SIZE_T SrcSize);
+
+// =============================================================
+// IRP COMPLETION ROUTINE
+// =============================================================
+
+static NTSTATUS KtlsIrpCompletion(
+    PDEVICE_OBJECT DeviceObject,
+    PIRP Irp,
+    PVOID Context
+) {
+    UNREFERENCED_PARAMETER(DeviceObject);
+    UNREFERENCED_PARAMETER(Irp);
+    
+    PKEVENT Event = (PKEVENT)Context;
+    KeSetEvent(Event, IO_NO_INCREMENT, FALSE);
+    
+    return STATUS_MORE_PROCESSING_REQUIRED;
+}
 
 // =============================================================
 // MEMORY MANAGEMENT
@@ -192,26 +215,6 @@ static NTSTATUS ValidateSessionParams(
         return STATUS_INVALID_PARAMETER;
     }
     
-    return STATUS_SUCCESS;
-}
-
-static NTSTATUS SafeBufferCopy(
-    PVOID Dest,
-    SIZE_T DestSize,
-    PVOID Src,
-    SIZE_T SrcSize
-) {
-    if (!Dest || !Src) {
-        KTLS_LOG_ERROR("SafeBufferCopy: NULL pointer");
-        return STATUS_INVALID_PARAMETER;
-    }
-    
-    if (SrcSize > DestSize) {
-        KTLS_LOG_ERROR("SafeBufferCopy: Buffer overflow (src=%zu, dest=%zu)", SrcSize, DestSize);
-        return STATUS_BUFFER_OVERFLOW;
-    }
-    
-    RtlCopyMemory(Dest, Src, SrcSize);
     return STATUS_SUCCESS;
 }
 
@@ -362,33 +365,43 @@ static NTSTATUS TdiOpenConnection(PKTLS_SESSION s) {
 static NTSTATUS TdiAssociate(PKTLS_SESSION s) {
     PIRP Irp;
     KEVENT Event;
-    IO_STATUS_BLOCK IoStatus;
+    PIO_STACK_LOCATION IrpSp;
     NTSTATUS Status;
     
     KeInitializeEvent(&Event, NotificationEvent, FALSE);
     
-    Irp = TdiBuildInternalDeviceControlIrp(
-        TDI_ASSOCIATE_ADDRESS,
-        s->DeviceObject,
-        s->ConnFileObj,
-        &Event,
-        &IoStatus
-    );
-    
+    // Manual IRP allocation
+    Irp = IoAllocateIrp(s->DeviceObject->StackSize, FALSE);
     if (!Irp) {
-        KTLS_LOG_ERROR("TdiBuildInternalDeviceControlIrp failed for ASSOCIATE");
+        KTLS_LOG_ERROR("IoAllocateIrp failed for ASSOCIATE");
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
+    Irp->Tail.Overlay.OriginalFileObject = s->ConnFileObj;
+    Irp->RequestorMode = KernelMode;
+
+    IrpSp = IoGetNextIrpStackLocation(Irp);
+    IrpSp->MajorFunction = IRP_MJ_INTERNAL_DEVICE_CONTROL;
+    IrpSp->MinorFunction = TDI_ASSOCIATE_ADDRESS;
+    IrpSp->FileObject = s->ConnFileObj;
+    IrpSp->DeviceObject = s->DeviceObject;
+
     TdiBuildAssociateAddress(Irp, s->DeviceObject, s->ConnFileObj, NULL, NULL, s->AddressHandle);
+
+    IoSetCompletionRoutine(Irp, KtlsIrpCompletion, &Event, TRUE, TRUE, TRUE);
 
     Status = IoCallDriver(s->DeviceObject, Irp);
     if (Status == STATUS_PENDING) {
         KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
-        Status = IoStatus.Status;
+        Status = Irp->IoStatus.Status;
     }
     
-    if (!NT_SUCCESS(Status)) {
+    // Manual cleanup
+    IoFreeIrp(Irp);
+    
+    if (NT_SUCCESS(Status)) {
+        KTLS_LOG_DEBUG("TDI Association successful");
+    } else {
         KTLS_LOG_ERROR("TdiAssociate failed: 0x%x", Status);
     }
     
@@ -398,7 +411,7 @@ static NTSTATUS TdiAssociate(PKTLS_SESSION s) {
 static NTSTATUS TdiConnect(PKTLS_SESSION s) {
     PIRP Irp;
     KEVENT Event;
-    IO_STATUS_BLOCK IoStatus;
+    PIO_STACK_LOCATION IrpSp;
     TA_IP_ADDRESS RemoteAddr;
     TDI_CONNECTION_INFORMATION ConnInfo;
     NTSTATUS Status;
@@ -415,26 +428,34 @@ static NTSTATUS TdiConnect(PKTLS_SESSION s) {
 
     KeInitializeEvent(&Event, NotificationEvent, FALSE);
     
-    Irp = TdiBuildInternalDeviceControlIrp(
-        TDI_CONNECT,
-        s->DeviceObject,
-        s->ConnFileObj,
-        &Event,
-        &IoStatus
-    );
-    
+    // Manual IRP allocation
+    Irp = IoAllocateIrp(s->DeviceObject->StackSize, FALSE);
     if (!Irp) {
-        KTLS_LOG_ERROR("TdiBuildInternalDeviceControlIrp failed for CONNECT");
+        KTLS_LOG_ERROR("IoAllocateIrp failed for CONNECT");
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
+    Irp->Tail.Overlay.OriginalFileObject = s->ConnFileObj;
+    Irp->RequestorMode = KernelMode;
+
+    IrpSp = IoGetNextIrpStackLocation(Irp);
+    IrpSp->MajorFunction = IRP_MJ_INTERNAL_DEVICE_CONTROL;
+    IrpSp->MinorFunction = TDI_CONNECT;
+    IrpSp->FileObject = s->ConnFileObj;
+    IrpSp->DeviceObject = s->DeviceObject;
+
     TdiBuildConnect(Irp, s->DeviceObject, s->ConnFileObj, NULL, NULL, NULL, &ConnInfo, NULL);
+
+    IoSetCompletionRoutine(Irp, KtlsIrpCompletion, &Event, TRUE, TRUE, TRUE);
 
     Status = IoCallDriver(s->DeviceObject, Irp);
     if (Status == STATUS_PENDING) {
         KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
-        Status = IoStatus.Status;
+        Status = Irp->IoStatus.Status;
     }
+    
+    // Manual cleanup
+    IoFreeIrp(Irp);
     
     if (!NT_SUCCESS(Status)) {
         KTLS_LOG_ERROR("TdiConnect failed: 0x%x", Status);
@@ -447,7 +468,7 @@ static NTSTATUS TdiSendGeneric(PKTLS_SESSION s, PVOID Data, ULONG Len) {
     PIRP Irp;
     PMDL Mdl;
     KEVENT Event;
-    IO_STATUS_BLOCK IoStatus;
+    PIO_STACK_LOCATION IrpSp;
     PVOID Buffer;
     NTSTATUS Status;
     PVOID ConnInfoToFree = NULL;
@@ -467,19 +488,16 @@ static NTSTATUS TdiSendGeneric(PKTLS_SESSION s, PVOID Data, ULONG Len) {
     IsTcp = (s->Protocol == KTLS_PROTO_TCP || s->Protocol == KTLS_PROTO_TCP_PLAIN);
     UCHAR MajorFunction = IsTcp ? TDI_SEND : TDI_SEND_DATAGRAM;
 
-    Irp = TdiBuildInternalDeviceControlIrp(
-        MajorFunction,
-        s->DeviceObject,
-        s->ActiveFileObj,
-        &Event,
-        &IoStatus
-    );
-    
+    // Manual IRP allocation
+    Irp = IoAllocateIrp(s->DeviceObject->StackSize, FALSE);
     if (!Irp) {
-        KTLS_LOG_ERROR("TdiBuildInternalDeviceControlIrp failed for SEND");
+        KTLS_LOG_ERROR("IoAllocateIrp failed for SEND");
         ExFreePoolWithTag(Buffer, DRIVER_TAG);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
+
+    Irp->Tail.Overlay.OriginalFileObject = s->ActiveFileObj;
+    Irp->RequestorMode = KernelMode;
 
     Mdl = IoAllocateMdl(Buffer, Len, FALSE, FALSE, NULL);
     if (!Mdl) {
@@ -489,6 +507,12 @@ static NTSTATUS TdiSendGeneric(PKTLS_SESSION s, PVOID Data, ULONG Len) {
         return STATUS_INSUFFICIENT_RESOURCES;
     }
     MmBuildMdlForNonPagedPool(Mdl);
+
+    IrpSp = IoGetNextIrpStackLocation(Irp);
+    IrpSp->MajorFunction = IRP_MJ_INTERNAL_DEVICE_CONTROL;
+    IrpSp->MinorFunction = MajorFunction;
+    IrpSp->FileObject = s->ActiveFileObj;
+    IrpSp->DeviceObject = s->DeviceObject;
 
     if (IsTcp) {
         TdiBuildSend(Irp, s->DeviceObject, s->ActiveFileObj, NULL, NULL, Mdl, 0, Len);
@@ -521,14 +545,19 @@ static NTSTATUS TdiSendGeneric(PKTLS_SESSION s, PVOID Data, ULONG Len) {
         TdiBuildSendDatagram(Irp, s->DeviceObject, s->ActiveFileObj, NULL, NULL, Mdl, Len, ConnInfo);
     }
 
+    IoSetCompletionRoutine(Irp, KtlsIrpCompletion, &Event, TRUE, TRUE, TRUE);
+
     Status = IoCallDriver(s->DeviceObject, Irp);
 
     if (Status == STATUS_PENDING) {
         KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
-        Status = IoStatus.Status;
+        Status = Irp->IoStatus.Status;
     }
 
-    // Cleanup
+    // Manual cleanup
+    IoFreeMdl(Mdl);
+    IoFreeIrp(Irp);
+    
     if (ConnInfoToFree) {
         ExFreePoolWithTag(ConnInfoToFree, DRIVER_TAG);
     }
@@ -539,8 +568,10 @@ static NTSTATUS TdiSendGeneric(PKTLS_SESSION s, PVOID Data, ULONG Len) {
         if (Status == STATUS_REMOTE_DISCONNECT) {
             s->ConnectionAlive = FALSE;
         }
-        // Don't log error for expected disconnect during close
-        if (Status != STATUS_REMOTE_DISCONNECT) {
+        // Don't log errors for expected disconnects during close
+        if (Status != STATUS_REMOTE_DISCONNECT && 
+            Status != STATUS_CANCELLED && 
+            Status != STATUS_CONNECTION_DISCONNECTED) {
             KTLS_LOG_ERROR("TdiSendGeneric failed: 0x%x", Status);
         }
     }
@@ -552,7 +583,7 @@ static NTSTATUS TdiRecvGeneric(PKTLS_SESSION s, PVOID Buffer, ULONG Len, PULONG 
     PIRP Irp;
     PMDL Mdl;
     KEVENT Event;
-    IO_STATUS_BLOCK IoStatus;
+    PIO_STACK_LOCATION IrpSp;
     NTSTATUS Status;
     LARGE_INTEGER TimeValue;
     BOOLEAN IsTcp;
@@ -562,18 +593,15 @@ static NTSTATUS TdiRecvGeneric(PKTLS_SESSION s, PVOID Buffer, ULONG Len, PULONG 
     IsTcp = (s->Protocol == KTLS_PROTO_TCP || s->Protocol == KTLS_PROTO_TCP_PLAIN);
     UCHAR Major = IsTcp ? TDI_RECEIVE : TDI_RECEIVE_DATAGRAM;
 
-    Irp = TdiBuildInternalDeviceControlIrp(
-        Major,
-        s->DeviceObject,
-        s->ActiveFileObj,
-        &Event,
-        &IoStatus
-    );
-    
+    // Manual IRP allocation
+    Irp = IoAllocateIrp(s->DeviceObject->StackSize, FALSE);
     if (!Irp) {
-        KTLS_LOG_ERROR("TdiBuildInternalDeviceControlIrp failed for RECEIVE");
+        KTLS_LOG_ERROR("IoAllocateIrp failed for RECEIVE");
         return STATUS_INSUFFICIENT_RESOURCES;
     }
+
+    Irp->Tail.Overlay.OriginalFileObject = s->ActiveFileObj;
+    Irp->RequestorMode = KernelMode;
 
     Mdl = IoAllocateMdl(Buffer, Len, FALSE, FALSE, NULL);
     if (!Mdl) {
@@ -583,42 +611,93 @@ static NTSTATUS TdiRecvGeneric(PKTLS_SESSION s, PVOID Buffer, ULONG Len, PULONG 
     }
     MmBuildMdlForNonPagedPool(Mdl);
 
+    IrpSp = IoGetNextIrpStackLocation(Irp);
+    IrpSp->MajorFunction = IRP_MJ_INTERNAL_DEVICE_CONTROL;
+    IrpSp->MinorFunction = Major;
+    IrpSp->FileObject = s->ActiveFileObj;
+    IrpSp->DeviceObject = s->DeviceObject;
+
     if (IsTcp) {
+        // TCP: Direct receive without PEEK (fixes race condition with FIN)
         TdiBuildReceive(Irp, s->DeviceObject, s->ActiveFileObj, NULL, NULL, Mdl, TDI_RECEIVE_NORMAL, Len);
-    } else {
-        TdiBuildReceiveDatagram(Irp, s->DeviceObject, s->ActiveFileObj, NULL, NULL, Mdl, Len, NULL, NULL, NULL);
-    }
-
-    Status = IoCallDriver(s->DeviceObject, Irp);
-
-    if (Status == STATUS_PENDING) {
-        if (s->TimeoutMs == 0) {
-            KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
-            Status = IoStatus.Status;
-        } else {
-            // Convert milliseconds to 100-nanosecond intervals (negative for relative time)
-            TimeValue.QuadPart = -(LONGLONG)s->TimeoutMs * 10000LL;
-
-            Status = KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, &TimeValue);
-
-            if (Status == STATUS_TIMEOUT) {
-                IoCancelIrp(Irp);
+        
+        IoSetCompletionRoutine(Irp, KtlsIrpCompletion, &Event, TRUE, TRUE, TRUE);
+        
+        Status = IoCallDriver(s->DeviceObject, Irp);
+        
+        if (Status == STATUS_PENDING) {
+            if (s->TimeoutMs == 0) {
                 KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
-                Status = STATUS_IO_TIMEOUT;
             } else {
-                Status = IoStatus.Status;
+                TimeValue.QuadPart = -(LONGLONG)s->TimeoutMs * 10000LL;
+                Status = KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, &TimeValue);
+                
+                if (Status == STATUS_TIMEOUT) {
+                    IoCancelIrp(Irp);
+                    KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
+                    
+                    // Check if data arrived just before cancellation
+                    if (NT_SUCCESS(Irp->IoStatus.Status) && Irp->IoStatus.Information > 0) {
+                        Status = Irp->IoStatus.Status;
+                    } else {
+                        IoFreeMdl(Mdl);
+                        IoFreeIrp(Irp);
+                        *Received = 0;
+                        return STATUS_IO_TIMEOUT;
+                    }
+                }
+            }
+            Status = Irp->IoStatus.Status;
+        }
+        
+        // Only return EOF on actual TDI-level closure
+        // 0 bytes can happen legitimately during TLS record reads
+        if (Status == STATUS_END_OF_FILE) {
+            IoFreeMdl(Mdl);
+            IoFreeIrp(Irp);
+            *Received = 0;
+            KTLS_LOG_DEBUG("TCP connection closed by peer (TDI EOF)");
+            return STATUS_END_OF_FILE;
+        }
+    } else {
+        // UDP: Direct receive
+        TdiBuildReceiveDatagram(Irp, s->DeviceObject, s->ActiveFileObj, NULL, NULL, Mdl, Len, NULL, NULL, NULL);
+        
+        IoSetCompletionRoutine(Irp, KtlsIrpCompletion, &Event, TRUE, TRUE, TRUE);
+        
+        Status = IoCallDriver(s->DeviceObject, Irp);
+
+        if (Status == STATUS_PENDING) {
+            if (s->TimeoutMs == 0) {
+                KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
+                Status = Irp->IoStatus.Status;
+            } else {
+                TimeValue.QuadPart = -(LONGLONG)s->TimeoutMs * 10000LL;
+                Status = KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, &TimeValue);
+
+                if (Status == STATUS_TIMEOUT) {
+                    IoCancelIrp(Irp);
+                    KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
+                    Status = STATUS_IO_TIMEOUT;
+                } else {
+                    Status = Irp->IoStatus.Status;
+                }
             }
         }
     }
 
     if (NT_SUCCESS(Status)) {
-        *Received = (ULONG)IoStatus.Information;
+        *Received = (ULONG)Irp->IoStatus.Information;
     } else {
         *Received = 0;
         if (Status != STATUS_IO_TIMEOUT) {
             KTLS_LOG_ERROR("TdiRecvGeneric failed: 0x%x", Status);
         }
     }
+
+    // Manual cleanup
+    IoFreeMdl(Mdl);
+    IoFreeIrp(Irp);
 
     return Status;
 }
@@ -701,7 +780,9 @@ static int KernelNetSend(void* ctx, const unsigned char* buf, size_t len) {
     
     if (!NT_SUCCESS(status)) {
         // Connection already closed by peer - this is expected during close
-        if (status == STATUS_REMOTE_DISCONNECT) {
+        if (status == STATUS_REMOTE_DISCONNECT || 
+            status == STATUS_CANCELLED || 
+            status == STATUS_CONNECTION_DISCONNECTED) {
             return MBEDTLS_ERR_SSL_CONN_EOF;
         }
         KTLS_LOG_ERROR("KernelNetSend failed: 0x%x", status);
@@ -721,15 +802,18 @@ static int KernelNetRecv(void* ctx, unsigned char* buf, size_t len) {
         return MBEDTLS_ERR_SSL_WANT_READ;
     }
 
+    if (status == STATUS_END_OF_FILE) {
+        KTLS_LOG_DEBUG("Socket closed during TLS read");
+        return MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY;
+    }
+
     if (!NT_SUCCESS(status)) {
         KTLS_LOG_ERROR("KernelNetRecv failed: 0x%x", status);
         return MBEDTLS_ERR_SSL_INTERNAL_ERROR;
     }
     
-    if ((s->Protocol == KTLS_PROTO_TCP || s->Protocol == KTLS_PROTO_TCP_PLAIN) && received == 0) {
-        return MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY;
-    }
-
+    // Allow 0-byte reads in TLS layer
+    // mbedTLS handles this correctly - it's part of normal SSL record processing
     return (int)received;
 }
 
@@ -1006,6 +1090,7 @@ NTSTATUS KtlsConnect(
     s->UseTls = g_ProtocolConfigs[Protocol].SupportsTls;
     s->TimeoutMs = g_ProtocolConfigs[Protocol].DefaultTimeout;
     s->ConnectionAlive = TRUE;
+    s->IsClosing = FALSE;
 
     KTLS_LOG_INFO("Connecting to %u.%u.%u.%u:%u (Protocol: %d, TLS: %d)",
         (Ip >> 0) & 0xFF, (Ip >> 8) & 0xFF, (Ip >> 16) & 0xFF, (Ip >> 24) & 0xFF,
@@ -1138,27 +1223,43 @@ NTSTATUS KtlsRecv(PKTLS_SESSION Session, PVOID Buffer, ULONG BufferSize, PULONG 
 VOID KtlsClose(PKTLS_SESSION s) {
     if (!s) return;
 
-    KTLS_LOG_INFO("Closing session");
+    // Prevent double close
+    if (s->IsClosing) {
+        KTLS_LOG_DEBUG("Session already closing, skipping");
+        return;
+    }
+    s->IsClosing = TRUE;
 
-    // Close TLS connection gracefully ONLY if:
-    // 1. TLS is being used
-    // 2. Handshake was completed
-    // 3. Connection is still alive (not closed by peer)
-    if (s->UseTls && 
-        s->ssl.state == MBEDTLS_SSL_HANDSHAKE_OVER && 
-        s->ConnectionAlive) {
-        int ret = mbedtls_ssl_close_notify(&s->ssl);
-        
-        if (ret != 0) {
-            // Log only if not an expected error
-            if (ret != MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY && 
-                ret != MBEDTLS_ERR_SSL_CONN_EOF) {
-                KTLS_LOG_DEBUG("close_notify failed: -0x%x", -ret);
+    KTLS_LOG_INFO("Closing session (ConnectionAlive: %d)", s->ConnectionAlive);
+
+    // Step 2: Send TLS close_notify ONLY if:
+    // - Using TLS
+    // - Connection is still alive
+    // - TLS handshake completed successfully
+    if (s->UseTls && s->ConnectionAlive) {
+        // Validate SSL state before attempting close_notify
+        if (s->ssl.state == MBEDTLS_SSL_HANDSHAKE_OVER) {
+            int ret = mbedtls_ssl_close_notify(&s->ssl);
+            
+            // Suppress logging for expected errors during shutdown
+            if (ret == MBEDTLS_ERR_NET_SEND_FAILED ||
+                ret == MBEDTLS_ERR_NET_CONN_RESET ||
+                ret == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY ||
+                ret == MBEDTLS_ERR_SSL_CONN_EOF ||
+                ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
+                // Expected: peer closed first or send failed after disassociate
+                KTLS_LOG_DEBUG("close_notify skipped (connection closed)");
+            } else if (ret != 0) {
+                // Only log truly unexpected errors
+                KTLS_LOG_DEBUG("close_notify failed: -0x%x (non-critical)", -ret);
             }
+        } else {
+            KTLS_LOG_DEBUG("Skipping close_notify (handshake not completed)");
         }
     }
 
-    // Clean mbedTLS contexts (only if initialized)
+    // Step 3: Clean mbedTLS contexts
+    // SAFE: These functions handle partial/uninitialized state internally
     if (s->UseTls) {
         mbedtls_ssl_free(&s->ssl);
         mbedtls_ssl_config_free(&s->conf);
@@ -1166,20 +1267,25 @@ VOID KtlsClose(PKTLS_SESSION s) {
         mbedtls_entropy_free(&s->entropy);
     }
 
-    // Clean TDI resources
+    // Step 4: Clean TDI resources
     if (s->ConnFileObj) {
         ObDereferenceObject(s->ConnFileObj);
+        s->ConnFileObj = NULL;
     }
     if (s->ConnectionHandle) {
         ZwClose(s->ConnectionHandle);
+        s->ConnectionHandle = NULL;
     }
     if (s->AddressFileObj) {
         ObDereferenceObject(s->AddressFileObj);
+        s->AddressFileObj = NULL;
     }
     if (s->AddressHandle) {
         ZwClose(s->AddressHandle);
+        s->AddressHandle = NULL;
     }
 
+    // Step 5: Free session memory
     ExFreePoolWithTag(s, DRIVER_TAG);
     
     KTLS_LOG_INFO("Session closed successfully");

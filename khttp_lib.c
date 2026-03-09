@@ -555,6 +555,14 @@ static NTSTATUS KhttpReceiveResponse(
     _In_ ULONG MaxResponseSize,
     _Out_ PKHTTP_RESPONSE* Response
 ) {
+    // Validate buffer before attempting receive
+    // Prevents PAGE_FAULT when called with NULL/0-sized buffer after streaming uploads
+    if (MaxResponseSize == 0 || !Response) {
+        if (Response) *Response = NULL;
+        DbgPrint("[KHTTP] [DEBUG] No response buffer provided, skipping receive\n");
+        return STATUS_SUCCESS;
+    }
+
     // Ensure reasonable buffer size
     if (MaxResponseSize > 100 * 1024 * 1024) {  // 100MB limit
         DbgPrint("[KHTTP] [WARN] Response size too large: %lu, clamping to 100MB\n",
@@ -939,8 +947,11 @@ static NTSTATUS KhttpStreamFileWithChunks(
     ULONG FileSize = (ULONG)FileInfo.EndOfFile.QuadPart;
     DbgPrint("[KHTTP] [STREAMING] File size: %lu bytes\n", FileSize);
 
-    // Update encoder total size
-    Encoder->TotalSize = FileSize;
+    // Preserve multipart overhead and add file size
+    ULONG MultipartOverhead = Encoder->TotalSize > 0 ? Encoder->TotalSize : 0;
+    Encoder->TotalSize = FileSize + MultipartOverhead;
+    DbgPrint("[KHTTP] [STREAMING] Total size: %lu bytes (%lu file + %lu overhead)\n",
+        Encoder->TotalSize, FileSize, MultipartOverhead);
 
     // Allocate chunk buffer
     PVOID ChunkBuffer = ExAllocatePoolWithTag(NonPagedPool, ChunkSize, KHTTP_TAG);
@@ -1441,8 +1452,37 @@ static NTSTATUS KhttpMultipartRequestInternal(
     // Send body
     if (UseChunked) {
         KHTTP_CHUNKED_ENCODER Encoder;
+        
+        // Calculate multipart overhead for accurate progress bar
+        ULONG MultipartOverhead = 0;
+        if (HasStreamFiles) {
+            size_t BoundaryLen = strlen(Boundary);
+            
+            // Form fields overhead
+            for (ULONG i = 0; i < FormFieldCount; i++) {
+                MultipartOverhead += (ULONG)(2 + BoundaryLen + 2);  // --boundary\r\n
+                MultipartOverhead += 50;  // Content-Disposition header
+                MultipartOverhead += (ULONG)strlen(FormFields[i].Name);
+                MultipartOverhead += (ULONG)strlen(FormFields[i].Value);
+                MultipartOverhead += 4;   // \r\n\r\n
+            }
+            
+            // Files overhead
+            for (ULONG i = 0; i < FileCount; i++) {
+                MultipartOverhead += (ULONG)(2 + BoundaryLen + 2);  // --boundary\r\n
+                MultipartOverhead += 100;  // Content-Disposition + Content-Type headers
+                MultipartOverhead += (ULONG)strlen(Files[i].FieldName);
+                MultipartOverhead += (ULONG)strlen(Files[i].FileName);
+                MultipartOverhead += 4;   // \r\n\r\n after headers
+                MultipartOverhead += 2;   // \r\n after file data
+            }
+            
+            MultipartOverhead += (ULONG)(2 + BoundaryLen + 4);  // --boundary--\r\n
+            DbgPrint("[KHTTP] Estimated multipart overhead: %lu bytes\n", MultipartOverhead);
+        }
+        
         KhttpInitChunkedEncoder(&Encoder, Connection->Session, ChunkSize,
-            HasStreamFiles ? 0 : BodyLength,
+            HasStreamFiles ? MultipartOverhead : BodyLength,
             Config ? Config->ProgressCallback : NULL,
             Config ? Config->CallbackContext : NULL);
 

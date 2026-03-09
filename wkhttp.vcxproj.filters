@@ -399,6 +399,21 @@
     <ClInclude Include="khttp_lib.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="kdns_cache.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="kdns_ip.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="kdns_packet.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="kdns_tdi.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="kdns_types.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="wkhttp_tests.c">
@@ -687,6 +702,18 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="khttp_lib.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="kdns_cache.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="kdns_ip.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="kdns_packet.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="kdns_tdi.c">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>

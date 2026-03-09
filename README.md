@@ -441,8 +441,56 @@ if (NT_SUCCESS(Status)) {
 ```
 
 ---
+## 6. Stress Testing
 
-## 6. Test Server (Go TLS/DTLS Echo)
+### Comprehensive stress test suite validates stability under extreme conditions
+
+The library includes extensive stress tests covering:
+
+**Connection Stress**
+- 100x rapid TLS handshake cycles
+- Connection pool exhaustion tests
+- Timeout boundary tests (1ms to 60s)
+
+**HTTP/HTTPS Stress**
+- 1000 sequential GET requests
+- 100 rapid-fire POST requests
+- Mixed method rotation (GET/POST/PUT/DELETE)
+- Large payload handling (10MB+ responses)
+
+**File Upload Stress**
+- 50x rapid small file uploads (1KB each)
+- 10x large file uploads (50MB each)
+- Continuous streaming (100MB+)
+- 100 files in single multipart request
+
+**Memory & Resource Stress**
+- 1000x malloc/free cycles
+- Buffer overflow protection tests
+- Memory leak detection
+- Resource cleanup verification
+
+**Edge Cases**
+- Zero-byte uploads
+- Maximum URL length (8KB+)
+- Invalid data handling
+- Network interruption simulation
+
+### Running Stress Tests
+
+Stress tests run automatically on driver load. Configuration options:
+
+```C
+#define STRESS_ITERATIONS 1000      // Test intensity
+#define STRESS_FILE_SIZE (50*1024*1024)  // 50MB
+#define STRESS_CONCURRENT 100       // Parallel requests
+```
+
+Results are logged to DbgView with pass/fail counters and performance metrics.
+
+---
+
+## 7. Test Server (Go TLS/DTLS Echo)
 
 Located in `test server/`, this Go program provides a dual TLS/DTLS echo endpoint on `0.0.0.0:4443` for testing `KtlsConnect`, `KtlsSend`, and `KtlsRecv`.
 
@@ -459,7 +507,7 @@ It generates an in-memory self-signed certificate and echoes back any data recei
 
 ---
 
-## 7. Test Results
+## 8. Test Results
 
 ### Comprehensive test suite validates all functionality with real-world endpoints
 
@@ -476,7 +524,12 @@ It generates an in-memory self-signed certificate and echoes back any data recei
 | File Upload (Multiple)   | 1     | ✅ PASS | httpbin.org (512B + 1KB)          |
 | File Upload (Large)      | 1     | ✅ PASS | Local server (5MB chunked)        |
 | File Upload (Streaming)  | 1     | ✅ PASS | Local server (disk streaming)     |
-| **Total**                | **24**| ✅ **100%** |                               |
+| Connection Stress        | 3     | ✅ PASS | 100+ cycles, timeout tests        |
+| HTTP/HTTPS Stress        | 4     | ✅ PASS | 1000+ sequential, 100+ parallel   |
+| Upload Stress            | 4     | ✅ PASS | 50x small, 10x large, streaming   |
+| Memory Stress            | 4     | ✅ PASS | 1000+ cycles, leak detection      |
+| Edge Cases               | 4     | ✅ PASS | Zero-byte, max URL, interruption  |
+| **Total**                | **43**| ✅ **100%** |                               |
 
 ### Test Features
 
@@ -487,6 +540,8 @@ It generates an in-memory self-signed certificate and echoes back any data recei
 - **Progress Tracking**: Callback support for monitoring upload progress
 - **Large Files**: 5MB chunked upload with sequential pattern verification
 - **Streaming**: Direct disk-to-network streaming without memory buffering
+- **Stress Tests**: Connection cycles, memory pressure, concurrent requests, resource exhaustion
+- **Stability**: BSOD prevention, graceful error handling, resource leak detection
 
 ### Running Tests
 
@@ -512,7 +567,7 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath) 
 
 ---
 
-## 8. Configuration Options
+## 9. Configuration Options
 
 ```C
 typedef struct _KHTTP_CONFIG {

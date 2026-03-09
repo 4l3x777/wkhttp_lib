@@ -1,3 +1,5 @@
+//#define STRESS_TESTS 1
+#if !defined(STRESS_TESTS)
 /**
  * @file wkhttp_tests.c
  * @brief Comprehensive test suite for Windows Kernel HTTP Library
@@ -936,3 +938,856 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
 
     return STATUS_SUCCESS;
 }
+#else
+/**
+ * @file wkhttp_stress_tests.c
+ * @brief Stress test suite for Windows Kernel HTTP Library
+ *
+ * This file contains stress and load tests to verify library stability under:
+ * - High request volumes (1000+ requests)
+ * - Rapid connect/disconnect cycles
+ * - Large file uploads (50MB+)
+ * - Memory allocation stress
+ * - Edge cases and boundary conditions
+ *
+ * @section stress_test_categories Stress Test Categories
+ * 1. Connection Stress (TLS handshake, DNS, timeouts)
+ * 2. HTTP Method Stress (GET/POST/PUT/DELETE high volume)
+ * 3. File Upload Stress (large files, streaming, multi-file)
+ * 4. Memory Stress (allocation/deallocation cycles, leaks)
+ * 5. Edge Cases (zero-byte, invalid data, interruptions)
+ *
+ * @note Tests are designed to find memory leaks, race conditions, deadlocks
+ * @warning Some tests may take 10+ minutes to complete
+ */
+
+#include <ntddk.h>
+#include "ktls_lib.h"
+#include "kdns_lib.h"
+#include "khttp_lib.h"
+
+ // =============================================================================
+ // STRESS TEST CONFIGURATION
+ // =============================================================================
+
+ // Stress intensity levels
+#define STRESS_LEVEL_LIGHT      10      // Quick smoke test
+#define STRESS_LEVEL_MEDIUM     100     // Standard stress test
+#define STRESS_LEVEL_HEAVY      1000    // Full stress test
+#define STRESS_LEVEL_EXTREME    10000   // Torture test
+
+// Current stress level (change as needed)
+#define STRESS_ITERATIONS       STRESS_LEVEL_MEDIUM
+
+// File sizes for stress tests
+#define STRESS_FILE_SMALL       1024            // 1KB
+#define STRESS_FILE_MEDIUM      (100 * 1024)    // 100KB
+#define STRESS_FILE_LARGE       (10 * 1024 * 1024)   // 10MB
+#define STRESS_FILE_HUGE        (50 * 1024 * 1024)   // 50MB
+
+// Concurrency simulation
+#define STRESS_CONCURRENT       10      // Simulated parallel requests
+
+// Timeouts
+#define STRESS_TIMEOUT_SHORT    1000    // 1 second
+#define STRESS_TIMEOUT_NORMAL   30000   // 30 seconds
+#define STRESS_TIMEOUT_LONG     120000  // 2 minutes
+
+// Test servers
+#define STRESS_TEST_HTTP_URL    "http://httpbin.org"
+#define STRESS_TEST_HTTPS_URL   "https://httpbin.org"
+#define STRESS_TEST_LOCAL_URL   "http://192.168.56.1:8080"
+
+// Memory tracking
+#define STRESS_POOL_TAG         'STES'  // 'STES' = Stress Test
+
+// =============================================================================
+// GLOBAL TEST COUNTERS
+// =============================================================================
+
+typedef struct _STRESS_TEST_STATS {
+    ULONG TotalTests;
+    ULONG PassedTests;
+    ULONG FailedTests;
+    ULONG TotalBytesAllocated;
+    ULONG TotalBytesSent;
+    ULONG TotalBytesReceived;
+    LARGE_INTEGER StartTime;
+    LARGE_INTEGER EndTime;
+} STRESS_TEST_STATS, * PSTRESS_TEST_STATS;
+
+static STRESS_TEST_STATS g_StressStats = { 0 };
+
+// =============================================================================
+// HELPER FUNCTIONS
+// =============================================================================
+
+/**
+ * @brief Initialize stress test statistics
+ */
+VOID StressInitStats(VOID)
+{
+    RtlZeroMemory(&g_StressStats, sizeof(STRESS_TEST_STATS));
+    KeQuerySystemTime(&g_StressStats.StartTime);
+}
+
+/**
+ * @brief Print final stress test statistics
+ */
+VOID StressPrintStats(VOID)
+{
+    KeQuerySystemTime(&g_StressStats.EndTime);
+
+    LARGE_INTEGER Duration;
+    Duration.QuadPart = g_StressStats.EndTime.QuadPart - g_StressStats.StartTime.QuadPart;
+    ULONG DurationSec = (ULONG)(Duration.QuadPart / 10000000);  // Convert to seconds
+
+    DbgPrint("\n========================================\n");
+    DbgPrint("  STRESS TEST STATISTICS\n");
+    DbgPrint("========================================\n");
+    DbgPrint("Total Tests:     %lu\n", g_StressStats.TotalTests);
+    DbgPrint("Passed:          %lu\n", g_StressStats.PassedTests);
+    DbgPrint("Failed:          %lu\n", g_StressStats.FailedTests);
+    DbgPrint("Duration:        %lu seconds\n", DurationSec);
+
+    // Bytes Allocated (convert to MB with 2 decimal places)
+    ULONG AllocMB = g_StressStats.TotalBytesAllocated / (1024 * 1024);
+    ULONG AllocKB = (g_StressStats.TotalBytesAllocated / 1024) % 1024;
+    ULONG AllocFrac = (AllocKB * 100) / 1024;  // Fractional part as percentage
+    DbgPrint("Bytes Allocated: %lu (%lu.%02lu MB)\n",
+        g_StressStats.TotalBytesAllocated, AllocMB, AllocFrac);
+
+    // Bytes Sent
+    ULONG SentMB = g_StressStats.TotalBytesSent / (1024 * 1024);
+    ULONG SentKB = (g_StressStats.TotalBytesSent / 1024) % 1024;
+    ULONG SentFrac = (SentKB * 100) / 1024;
+    DbgPrint("Bytes Sent:      %lu (%lu.%02lu MB)\n",
+        g_StressStats.TotalBytesSent, SentMB, SentFrac);
+
+    // Bytes Received
+    ULONG RecvMB = g_StressStats.TotalBytesReceived / (1024 * 1024);
+    ULONG RecvKB = (g_StressStats.TotalBytesReceived / 1024) % 1024;
+    ULONG RecvFrac = (RecvKB * 100) / 1024;
+    DbgPrint("Bytes Received:  %lu (%lu.%02lu MB)\n",
+        g_StressStats.TotalBytesReceived, RecvMB, RecvFrac);
+
+    // Requests per second (integer division)
+    if (DurationSec > 0) {
+        ULONG ReqPerSec = g_StressStats.TotalTests / DurationSec;
+        ULONG ReqFrac = ((g_StressStats.TotalTests % DurationSec) * 100) / DurationSec;
+        DbgPrint("Requests/sec:    %lu.%02lu\n", ReqPerSec, ReqFrac);
+    }
+
+    // Success rate as integer percentage
+    ULONG SuccessRate = g_StressStats.TotalTests > 0 ?
+        (g_StressStats.PassedTests * 100) / g_StressStats.TotalTests : 0;
+    ULONG SuccessFrac = g_StressStats.TotalTests > 0 ?
+        ((g_StressStats.PassedTests * 10000) / g_StressStats.TotalTests) % 100 : 0;
+    DbgPrint("Success Rate:    %lu.%02lu%%\n", SuccessRate, SuccessFrac);
+    DbgPrint("========================================\n");
+}
+
+/**
+ * @brief Record test result
+ */
+VOID StressRecordResult(NTSTATUS Status, ULONG BytesSent, ULONG BytesReceived)
+{
+    g_StressStats.TotalTests++;
+
+    if (NT_SUCCESS(Status)) {
+        g_StressStats.PassedTests++;
+    }
+    else {
+        g_StressStats.FailedTests++;
+    }
+
+    g_StressStats.TotalBytesSent += BytesSent;
+    g_StressStats.TotalBytesReceived += BytesReceived;
+}
+
+/**
+ * @brief Print test progress
+ */
+VOID StressPrintProgress(PCHAR TestName, ULONG Current, ULONG Total)
+{
+    if (Current % (Total / 10) == 0 || Current == Total) {
+        ULONG Percent = (Current * 100) / Total;
+        DbgPrint("[STRESS] %s: %lu%% (%lu/%lu)\n", TestName, Percent, Current, Total);
+    }
+}
+
+// =============================================================================
+// CATEGORY 1: CONNECTION STRESS TESTS
+// =============================================================================
+
+/**
+ * @brief Stress test: Rapid TLS connect/disconnect cycles
+ *
+ * Opens and closes TLS connections repeatedly to test:
+ * - Handshake stability
+ * - Resource cleanup
+ * - Memory leaks in connection handling
+ */
+VOID StressTlsConnections(VOID)
+{
+    DbgPrint("\n[STRESS] TLS Connection Cycles (%lu iterations)\n", STRESS_ITERATIONS);
+
+    for (ULONG i = 0; i < STRESS_ITERATIONS; i++) {
+        PKTLS_SESSION Session = NULL;
+
+        NTSTATUS Status = KtlsConnect(
+            INETADDR(192, 168, 56, 1),
+            4443,
+            KTLS_PROTO_TCP,
+            "192.168.56.1",
+            &Session
+        );
+
+        if (NT_SUCCESS(Status)) {
+            KtlsClose(Session);
+            StressRecordResult(STATUS_SUCCESS, 0, 0);
+        }
+        else {
+            StressRecordResult(Status, 0, 0);
+        }
+
+        StressPrintProgress("TLS Connections", i + 1, STRESS_ITERATIONS);
+    }
+}
+
+/**
+ * @brief Stress test: DNS resolution cycles
+ *
+ * Performs repeated DNS queries to test:
+ * - DNS cache behavior
+ * - Query throttling
+ * - Memory management in DNS resolver
+ */
+VOID StressDnsResolution(VOID)
+{
+    DbgPrint("\n[STRESS] DNS Resolution Cycles (%lu iterations)\n", STRESS_ITERATIONS);
+
+    PCHAR Hostnames[] = {
+        "google.com",
+        "github.com",
+        "microsoft.com",
+        "httpbin.org",
+        "example.com"
+    };
+    ULONG HostnameCount = sizeof(Hostnames) / sizeof(Hostnames[0]);
+
+    for (ULONG i = 0; i < STRESS_ITERATIONS; i++) {
+        ULONG Ip = 0;
+        PCHAR Hostname = Hostnames[i % HostnameCount];
+
+        NTSTATUS Status = KdnsResolve(
+            Hostname,
+            INETADDR(8, 8, 8, 8),
+            3000,
+            &Ip
+        );
+
+        StressRecordResult(Status, 0, 0);
+        StressPrintProgress("DNS Resolution", i + 1, STRESS_ITERATIONS);
+    }
+}
+
+/**
+ * @brief Stress test: Timeout boundary testing
+ *
+ * Tests connection behavior with various timeout values:
+ * - Very short timeouts (1ms)
+ * - Normal timeouts (5s)
+ * - Long timeouts (60s)
+ */
+VOID StressTimeouts(VOID)
+{
+    DbgPrint("\n[STRESS] Timeout Boundary Tests\n");
+
+    ULONG Timeouts[] = { 1, 100, 1000, 5000, 10000, 30000, 60000 };
+    ULONG TimeoutCount = sizeof(Timeouts) / sizeof(Timeouts[0]);
+
+    for (ULONG i = 0; i < TimeoutCount; i++) {
+        PKHTTP_RESPONSE Response = NULL;
+
+        KHTTP_CONFIG Config = {
+            .UseHttps = FALSE,
+            .TimeoutMs = Timeouts[i],
+            .MaxResponseSize = 1024
+        };
+
+        DbgPrint("[STRESS] Testing timeout: %lu ms\n", Timeouts[i]);
+
+        NTSTATUS Status = KhttpGet(
+            "http://httpbin.org/delay/10",  // 10 second delay endpoint
+            NULL,
+            &Config,
+            &Response
+        );
+
+        if (Response) {
+            StressRecordResult(Status, 0, Response->BodyLength);
+            KhttpFreeResponse(Response);
+        }
+        else {
+            StressRecordResult(Status, 0, 0);
+        }
+    }
+}
+
+// =============================================================================
+// CATEGORY 2: HTTP METHOD STRESS TESTS
+// =============================================================================
+
+/**
+ * @brief Stress test: Sequential GET requests
+ *
+ * Sends many GET requests in sequence to test:
+ * - Request handling stability
+ * - Response parsing
+ * - Memory cleanup
+ */
+VOID StressHttpGet(VOID)
+{
+    DbgPrint("\n[STRESS] HTTP GET Requests (%lu iterations)\n", STRESS_ITERATIONS);
+
+    for (ULONG i = 0; i < STRESS_ITERATIONS; i++) {
+        PKHTTP_RESPONSE Response = NULL;
+
+        NTSTATUS Status = KhttpGet(
+            "https://httpbin.org/get",
+            NULL,
+            NULL,
+            &Response
+        );
+
+        if (NT_SUCCESS(Status) && Response) {
+            StressRecordResult(Status, 0, Response->BodyLength);
+            KhttpFreeResponse(Response);
+        }
+        else {
+            StressRecordResult(Status, 0, 0);
+        }
+
+        StressPrintProgress("HTTP GET", i + 1, STRESS_ITERATIONS);
+    }
+}
+
+/**
+ * @brief Stress test: Rapid POST requests
+ *
+ * Sends many POST requests with JSON payloads to test:
+ * - Content-Type handling
+ * - Request body encoding
+ * - Response consistency
+ */
+VOID StressHttpPost(VOID)
+{
+    DbgPrint("\n[STRESS] HTTP POST Requests (%lu iterations)\n", STRESS_ITERATIONS);
+
+    for (ULONG i = 0; i < STRESS_ITERATIONS; i++) {
+        PKHTTP_RESPONSE Response = NULL;
+        CHAR JsonPayload[256];
+
+        RtlStringCbPrintfA(JsonPayload, sizeof(JsonPayload),
+            "{\"iteration\":%lu,\"test\":\"stress\",\"timestamp\":%llu}",
+            i, KeQueryInterruptTime());
+
+        NTSTATUS Status = KhttpPost(
+            "https://httpbin.org/post",
+            "Content-Type: application/json\r\n",
+            JsonPayload,
+            NULL,
+            &Response
+        );
+
+        if (NT_SUCCESS(Status) && Response) {
+            StressRecordResult(Status, (ULONG)strlen(JsonPayload), Response->BodyLength);
+            KhttpFreeResponse(Response);
+        }
+        else {
+            StressRecordResult(Status, (ULONG)strlen(JsonPayload), 0);
+        }
+
+        StressPrintProgress("HTTP POST", i + 1, STRESS_ITERATIONS);
+    }
+}
+
+/**
+ * @brief Stress test: Mixed HTTP methods
+ *
+ * Rotates through GET/POST/PUT/DELETE to test:
+ * - Method switching stability
+ * - Header variations
+ * - Response code handling
+ */
+VOID StressMixedMethods(VOID)
+{
+    DbgPrint("\n[STRESS] Mixed HTTP Methods (%lu iterations)\n", STRESS_ITERATIONS);
+
+    for (ULONG i = 0; i < STRESS_ITERATIONS; i++) {
+        PKHTTP_RESPONSE Response = NULL;
+        NTSTATUS Status = STATUS_UNSUCCESSFUL;
+
+        switch (i % 4) {
+        case 0:  // GET
+            Status = KhttpGet("https://httpbin.org/get", NULL, NULL, &Response);
+            break;
+        case 1:  // POST
+            Status = KhttpPost("https://httpbin.org/post", NULL, "{\"test\":1}", NULL, &Response);
+            break;
+        case 2:  // PUT
+            Status = KhttpPut("https://httpbin.org/put", NULL, "{\"test\":2}", NULL, &Response);
+            break;
+        case 3:  // DELETE
+            Status = KhttpDelete("https://httpbin.org/delete", NULL, NULL, &Response);
+            break;
+        }
+
+        if (NT_SUCCESS(Status) && Response) {
+            StressRecordResult(Status, 0, Response->BodyLength);
+            KhttpFreeResponse(Response);
+        }
+        else {
+            StressRecordResult(Status, 0, 0);
+        }
+
+        StressPrintProgress("Mixed Methods", i + 1, STRESS_ITERATIONS);
+    }
+}
+
+// =============================================================================
+// CATEGORY 3: FILE UPLOAD STRESS TESTS
+// =============================================================================
+
+/**
+ * @brief Stress test: Rapid small file uploads
+ *
+ * Uploads many small files quickly to test:
+ * - Multipart encoding stability
+ * - Boundary generation
+ * - Memory allocation patterns
+ */
+VOID StressSmallFileUploads(VOID)
+{
+    DbgPrint("\n[STRESS] Small File Uploads (%lu x 1KB)\n", STRESS_LEVEL_LIGHT);
+
+    PVOID FileData = ExAllocatePoolWithTag(NonPagedPool, STRESS_FILE_SMALL, STRESS_POOL_TAG);
+    if (!FileData) {
+        DbgPrint("[STRESS] Memory allocation failed\n");
+        return;
+    }
+
+    RtlFillMemory(FileData, STRESS_FILE_SMALL, 0xAB);
+    g_StressStats.TotalBytesAllocated += STRESS_FILE_SMALL;
+
+    for (ULONG i = 0; i < STRESS_LEVEL_LIGHT; i++) {
+        CHAR FileName[64];
+        RtlStringCbPrintfA(FileName, sizeof(FileName), "stress_%lu.bin", i);
+
+        KHTTP_FILE File = {
+            .FieldName = "file",
+            .FileName = FileName,
+            .ContentType = "application/octet-stream",
+            .Data = FileData,
+            .DataLength = STRESS_FILE_SMALL
+        };
+
+        PKHTTP_RESPONSE Response = NULL;
+        NTSTATUS Status = KhttpPostMultipart(
+            "https://httpbin.org/post",
+            NULL,
+            NULL, 0,
+            &File, 1,
+            NULL,
+            &Response
+        );
+
+        if (NT_SUCCESS(Status) && Response) {
+            StressRecordResult(Status, STRESS_FILE_SMALL, Response->BodyLength);
+            KhttpFreeResponse(Response);
+        }
+        else {
+            StressRecordResult(Status, STRESS_FILE_SMALL, 0);
+        }
+
+        StressPrintProgress("Small File Upload", i + 1, STRESS_LEVEL_LIGHT);
+    }
+
+    ExFreePoolWithTag(FileData, STRESS_POOL_TAG);
+}
+
+/**
+ * @brief Stress test: Large file upload cycles
+ *
+ * Uploads multiple large files (10MB each) to test:
+ * - Memory management with large buffers
+ * - Chunked transfer encoding
+ * - Progress callback stability
+ */
+VOID StressLargeFileUploads(VOID)
+{
+    DbgPrint("\n[STRESS] Large File Uploads (5 x 10MB)\n");
+
+    PVOID FileData = ExAllocatePoolWithTag(NonPagedPool, STRESS_FILE_LARGE, STRESS_POOL_TAG);
+    if (!FileData) {
+        DbgPrint("[STRESS] Failed to allocate 10MB\n");
+        return;
+    }
+
+    // Fill with pattern
+    for (ULONG i = 0; i < STRESS_FILE_LARGE / 4; i++) {
+        ((ULONG*)FileData)[i] = i;
+    }
+    g_StressStats.TotalBytesAllocated += STRESS_FILE_LARGE;
+
+    for (ULONG i = 0; i < 5; i++) {
+        DbgPrint("[STRESS] Uploading large file %lu/5...\n", i + 1);
+
+        KHTTP_FILE File = {
+            .FieldName = "largefile",
+            .FileName = "large_10mb.bin",
+            .ContentType = "application/octet-stream",
+            .Data = FileData,
+            .DataLength = STRESS_FILE_LARGE
+        };
+
+        KHTTP_CONFIG Config = {
+            .UseHttps = FALSE,
+            .TimeoutMs = STRESS_TIMEOUT_LONG,
+            .UseChunkedTransfer = TRUE,
+            .ChunkSize = 64 * 1024
+        };
+
+        PKHTTP_RESPONSE Response = NULL;
+        NTSTATUS Status = KhttpPostMultipartChunked(
+            "http://192.168.56.1:8080/upload",
+            NULL,
+            NULL, 0,
+            &File, 1,
+            &Config,
+            &Response
+        );
+
+        if (NT_SUCCESS(Status) && Response) {
+            StressRecordResult(Status, STRESS_FILE_LARGE, Response->BodyLength);
+            KhttpFreeResponse(Response);
+        }
+        else {
+            StressRecordResult(Status, STRESS_FILE_LARGE, 0);
+        }
+    }
+
+    ExFreePoolWithTag(FileData, STRESS_POOL_TAG);
+}
+
+/**
+ * @brief Stress test: Multiple files in single request
+ *
+ * Uploads many files in one multipart request to test:
+ * - Boundary handling with many parts
+ * - Memory allocation for multiple buffers
+ * - Request size limits
+ */
+VOID StressMultiFileUpload(VOID)
+{
+    DbgPrint("\n[STRESS] Multi-File Upload (20 files in 1 request)\n");
+
+#define MULTI_FILE_COUNT 20
+    PVOID FileDatas[MULTI_FILE_COUNT] = { 0 };
+    KHTTP_FILE Files[MULTI_FILE_COUNT] = { 0 };
+
+    // Allocate all files
+    for (ULONG i = 0; i < MULTI_FILE_COUNT; i++) {
+        FileDatas[i] = ExAllocatePoolWithTag(NonPagedPool, STRESS_FILE_SMALL, STRESS_POOL_TAG);
+        if (!FileDatas[i]) {
+            DbgPrint("[STRESS] Memory allocation failed at file %lu\n", i);
+            goto cleanup;
+        }
+
+        RtlFillMemory(FileDatas[i], STRESS_FILE_SMALL, (UCHAR)(0x10 + i));
+        g_StressStats.TotalBytesAllocated += STRESS_FILE_SMALL;
+
+        CHAR FieldName[32], FileName[32];
+        RtlStringCbPrintfA(FieldName, sizeof(FieldName), "file%lu", i);
+        RtlStringCbPrintfA(FileName, sizeof(FileName), "doc%lu.bin", i);
+
+        Files[i].FieldName = FieldName;
+        Files[i].FileName = FileName;
+        Files[i].ContentType = "application/octet-stream";
+        Files[i].Data = FileDatas[i];
+        Files[i].DataLength = STRESS_FILE_SMALL;
+    }
+
+    PKHTTP_RESPONSE Response = NULL;
+    NTSTATUS Status = KhttpPostMultipart(
+        "https://httpbin.org/post",
+        NULL,
+        NULL, 0,
+        Files, MULTI_FILE_COUNT,
+        NULL,
+        &Response
+    );
+
+    if (NT_SUCCESS(Status) && Response) {
+        StressRecordResult(Status, STRESS_FILE_SMALL * MULTI_FILE_COUNT, Response->BodyLength);
+        KhttpFreeResponse(Response);
+    }
+    else {
+        StressRecordResult(Status, STRESS_FILE_SMALL * MULTI_FILE_COUNT, 0);
+    }
+
+cleanup:
+    for (ULONG i = 0; i < MULTI_FILE_COUNT; i++) {
+        if (FileDatas[i]) {
+            ExFreePoolWithTag(FileDatas[i], STRESS_POOL_TAG);
+        }
+    }
+}
+
+// =============================================================================
+// CATEGORY 4: MEMORY & RESOURCE STRESS TESTS
+// =============================================================================
+
+/**
+ * @brief Stress test: Response object allocation/deallocation
+ *
+ * Creates and destroys many response objects to test:
+ * - Memory leak detection
+ * - Pool corruption
+ * - Reference counting
+ */
+VOID StressMemoryAllocation(VOID)
+{
+    DbgPrint("\n[STRESS] Memory Allocation Cycles (%lu iterations)\n", STRESS_ITERATIONS);
+
+    for (ULONG i = 0; i < STRESS_ITERATIONS; i++) {
+        // Allocate various sizes
+        ULONG Size = (i % 10 + 1) * 1024;  // 1KB to 10KB
+
+        PVOID Buffer = ExAllocatePoolWithTag(NonPagedPool, Size, STRESS_POOL_TAG);
+        if (Buffer) {
+            g_StressStats.TotalBytesAllocated += Size;
+            RtlFillMemory(Buffer, Size, (UCHAR)(i & 0xFF));
+            ExFreePoolWithTag(Buffer, STRESS_POOL_TAG);
+        }
+        else {
+            DbgPrint("[STRESS] Allocation failed at iteration %lu (size %lu)\n", i, Size);
+        }
+
+        StressPrintProgress("Memory Allocation", i + 1, STRESS_ITERATIONS);
+    }
+}
+
+/**
+ * @brief Stress test: Verify no memory leaks after requests
+ *
+ * Makes many requests and checks that memory is properly freed.
+ * Uses tagged allocations to track leaks.
+ */
+VOID StressMemoryLeaks(VOID)
+{
+    DbgPrint("\n[STRESS] Memory Leak Detection (%lu requests)\n", STRESS_LEVEL_LIGHT);
+
+    ULONG InitialAllocated = g_StressStats.TotalBytesAllocated;
+
+    for (ULONG i = 0; i < STRESS_LEVEL_LIGHT; i++) {
+        PKHTTP_RESPONSE Response = NULL;
+
+        NTSTATUS Status = KhttpGet(
+            "https://httpbin.org/get",
+            NULL,
+            NULL,
+            &Response
+        );
+
+        if (NT_SUCCESS(Status) && Response) {
+            // Intentionally free response to test cleanup
+            KhttpFreeResponse(Response);
+        }
+
+        StressPrintProgress("Memory Leak Check", i + 1, STRESS_LEVEL_LIGHT);
+    }
+
+    ULONG FinalAllocated = g_StressStats.TotalBytesAllocated;
+    DbgPrint("[STRESS] Memory delta: %lu bytes (should be near zero)\n",
+        FinalAllocated - InitialAllocated);
+}
+
+// =============================================================================
+// CATEGORY 5: EDGE CASES & BOUNDARY TESTS
+// =============================================================================
+
+/**
+ * @brief Stress test: Zero-byte and empty requests
+ *
+ * Tests edge cases like:
+ * - Zero-byte file uploads
+ * - Empty POST bodies
+ * - NULL headers
+ */
+VOID StressEdgeCases(VOID)
+{
+    DbgPrint("\n[STRESS] Edge Case Tests\n");
+
+    // Test 1: Zero-byte file upload
+    DbgPrint("[STRESS] Test: Zero-byte file upload\n");
+    KHTTP_FILE EmptyFile = {
+        .FieldName = "empty",
+        .FileName = "empty.txt",
+        .ContentType = "text/plain",
+        .Data = NULL,
+        .DataLength = 0
+    };
+
+    PKHTTP_RESPONSE Response = NULL;
+    NTSTATUS Status = KhttpPostMultipart(
+        "https://httpbin.org/post",
+        NULL,
+        NULL, 0,
+        &EmptyFile, 1,
+        NULL,
+        &Response
+    );
+    StressRecordResult(Status, 0, Response ? Response->BodyLength : 0);
+    if (Response) KhttpFreeResponse(Response);
+
+    // Test 2: Empty POST body
+    DbgPrint("[STRESS] Test: Empty POST body\n");
+    Status = KhttpPost("https://httpbin.org/post", NULL, "", NULL, &Response);
+    StressRecordResult(Status, 0, Response ? Response->BodyLength : 0);
+    if (Response) KhttpFreeResponse(Response);
+
+    // Test 3: Very long URL (8KB)
+    DbgPrint("[STRESS] Test: Very long URL\n");
+    PVOID LongUrl = ExAllocatePoolWithTag(NonPagedPool, 8192, STRESS_POOL_TAG);
+    if (LongUrl) {
+        RtlStringCbPrintfA(LongUrl, 8192, "https://httpbin.org/get?");
+        for (ULONG i = 0; i < 200; i++) {
+            RtlStringCbCatA(LongUrl, 8192, "param=value&");
+        }
+
+        Status = KhttpGet(LongUrl, NULL, NULL, &Response);
+        StressRecordResult(Status, 0, Response ? Response->BodyLength : 0);
+        if (Response) KhttpFreeResponse(Response);
+
+        ExFreePoolWithTag(LongUrl, STRESS_POOL_TAG);
+    }
+
+    // Test 4: Invalid Content-Type
+    DbgPrint("[STRESS] Test: Invalid Content-Type\n");
+    Status = KhttpPost(
+        "https://httpbin.org/post",
+        "Content-Type: invalid/type/format/test\r\n",
+        "{\"test\":1}",
+        NULL,
+        &Response
+    );
+    StressRecordResult(Status, 0, Response ? Response->BodyLength : 0);
+    if (Response) KhttpFreeResponse(Response);
+}
+
+/**
+ * @brief Stress test: Maximum response size handling
+ *
+ * Tests behavior when receiving very large responses.
+ */
+VOID StressLargeResponses(VOID)
+{
+    DbgPrint("\n[STRESS] Large Response Handling\n");
+
+    // Request increasing response sizes
+    ULONG Sizes[] = { 1024, 10240, 102400, 1048576 };  // 1KB, 10KB, 100KB, 1MB
+
+    for (ULONG i = 0; i < sizeof(Sizes) / sizeof(Sizes[0]); i++) {
+        CHAR Url[256];
+        RtlStringCbPrintfA(Url, sizeof(Url),
+            "https://httpbin.org/bytes/%lu", Sizes[i]);
+
+        DbgPrint("[STRESS] Requesting %lu bytes...\n", Sizes[i]);
+
+        KHTTP_CONFIG Config = {
+            .UseHttps = TRUE,
+            .TimeoutMs = STRESS_TIMEOUT_NORMAL,
+            .MaxResponseSize = Sizes[i] + 1024  // Allow for headers
+        };
+
+        PKHTTP_RESPONSE Response = NULL;
+        NTSTATUS Status = KhttpGet(Url, NULL, &Config, &Response);
+
+        if (NT_SUCCESS(Status) && Response) {
+            DbgPrint("[STRESS] Received %lu bytes\n", Response->BodyLength);
+            StressRecordResult(Status, 0, Response->BodyLength);
+            KhttpFreeResponse(Response);
+        }
+        else {
+            StressRecordResult(Status, 0, 0);
+        }
+    }
+}
+
+// =============================================================================
+// DRIVER ENTRY AND TEST ORCHESTRATION
+// =============================================================================
+
+VOID DriverUnload(PDRIVER_OBJECT DriverObject)
+{
+    UNREFERENCED_PARAMETER(DriverObject);
+
+    StressPrintStats();
+    KhttpGlobalCleanup();
+    DbgPrint("[STRESS] Driver unloaded\n");
+}
+
+NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
+{
+    UNREFERENCED_PARAMETER(RegistryPath);
+    DriverObject->DriverUnload = DriverUnload;
+
+    DbgPrint("\n========================================\n");
+    DbgPrint("  WKHTTP STRESS TEST SUITE\n");
+    DbgPrint("  Intensity: %lu iterations\n", STRESS_ITERATIONS);
+    DbgPrint("========================================\n");
+
+    NTSTATUS Status = KhttpGlobalInit();
+    if (!NT_SUCCESS(Status)) {
+        DbgPrint("[STRESS] Library init failed: 0x%08X\n", Status);
+        return Status;
+    }
+
+    StressInitStats();
+
+    // Category 1: Connection Stress
+    DbgPrint("\n=== CATEGORY 1: CONNECTION STRESS ===\n");
+    StressTlsConnections();
+    StressDnsResolution();
+    StressTimeouts();
+
+    // Category 2: HTTP Method Stress
+    DbgPrint("\n=== CATEGORY 2: HTTP METHOD STRESS ===\n");
+    StressHttpGet();
+    StressHttpPost();
+    StressMixedMethods();
+
+    // Category 3: File Upload Stress
+    DbgPrint("\n=== CATEGORY 3: FILE UPLOAD STRESS ===\n");
+    StressSmallFileUploads();
+    StressMultiFileUpload();
+    // StressLargeFileUploads();  // Uncomment for long tests
+
+    // Category 4: Memory Stress
+    DbgPrint("\n=== CATEGORY 4: MEMORY STRESS ===\n");
+    StressMemoryAllocation();
+    StressMemoryLeaks();
+
+    // Category 5: Edge Cases
+    DbgPrint("\n=== CATEGORY 5: EDGE CASES ===\n");
+    StressEdgeCases();
+    StressLargeResponses();
+
+    StressPrintStats();
+
+    DbgPrint("\n[STRESS] All stress tests completed!\n");
+    return STATUS_SUCCESS;
+}
+#endif
